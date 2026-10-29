@@ -31,13 +31,13 @@ export class StatusBarManager implements vscode.Disposable {
     this.lastRunningState = running;
     const engine = getEngineLabel();
     if (running === undefined) {
-      this.launcherItem.text = `$(layers) Docker & Podman (${engine})`;
+      this.launcherItem.text = `$(docker-podman-studio-logo) Docker & Podman (${engine})`;
       this.launcherItem.tooltip = bt('openStudioTooltip', { engine });
     } else if (running) {
-      this.launcherItem.text = `$(layers) Docker & Podman (${engine}) $(circle-filled)`;
+      this.launcherItem.text = `$(docker-podman-studio-logo) Docker & Podman (${engine}) $(circle-filled)`;
       this.launcherItem.tooltip = bt('engineActiveTooltip', { engine });
     } else {
-      this.launcherItem.text = `$(layers) Docker & Podman (${engine}) $(circle-outline)`;
+      this.launcherItem.text = `$(docker-podman-studio-logo) Docker & Podman (${engine}) $(circle-outline)`;
       this.launcherItem.tooltip = bt('engineStoppedTooltip', { engine });
     }
   }

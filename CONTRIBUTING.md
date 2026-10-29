@@ -31,6 +31,14 @@ Use Node.js 22 or newer for development and packaging.
    ```
 3. Press `F5` in VS Code to launch an **Extension Development Host** window.
 
+The monochrome brand icon in `resources/studio-activity.svg` is also the source
+for the status bar's icon font. After editing its filled paths, regenerate the
+checked-in font with Python and `fonttools==4.61.1`:
+
+```bash
+python -m scripts.generate_brand_icon
+```
+
 ## Tests
 
 Run `npm test` for the regression suite. It does not require Podman and skips the opt-in integration tests. CI runs the same suite, type-checks the extension host, and builds the webview and extension.

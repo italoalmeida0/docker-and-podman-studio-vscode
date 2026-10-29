@@ -164,6 +164,15 @@
         "icon": "$(discard)"
       }
     ],
+    "icons": {
+      "docker-podman-studio-logo": {
+        "description": "%ext.displayName%",
+        "default": {
+          "fontPath": "resources/studio-icon.woff",
+          "fontCharacter": "\\E001"
+        }
+      }
+    },
     "viewsContainers": {
       "activitybar": [
         {

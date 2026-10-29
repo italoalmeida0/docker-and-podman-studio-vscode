@@ -120,7 +120,7 @@ export class StudioWebviewPanel implements vscode.Disposable {
     this.panel.iconPath = vscode.Uri.joinPath(
       this.extensionUri,
       'resources',
-      'studio-activity.svg'
+      'icon.png'
     );
     this.panel.webview.html = this.getHtml(this.panel.webview);
 
