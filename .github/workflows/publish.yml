@@ -1,0 +1,120 @@
+name: Publish to VS Code Marketplace
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vscode-marketplace-publish
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Validate and package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout release
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            webview-ui/package-lock.json
+
+      - name: Validate release version and source
+        id: version
+        shell: bash
+        run: |
+          git merge-base --is-ancestor HEAD origin/main || {
+            echo "::error::Release commits must already be on main."
+            exit 1
+          }
+          node <<'NODE'
+          const fs = require('node:fs');
+          const { publisher, name, version } = require('./package.json');
+          if (publisher !== 'ItaloAlmeida' || name !== 'docker-and-podman-studio') {
+            throw new Error('Unexpected Marketplace extension identity.');
+          }
+          if (typeof version !== 'string' || version.trim() !== version ||
+              !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) {
+            throw new Error('Publishing requires a stable major.minor.patch version.');
+          }
+          if (process.env.GITHUB_EVENT_NAME === 'push' &&
+              process.env.GITHUB_REF !== `refs/tags/v${version}`) {
+            throw new Error('The release tag must match the package.json version.');
+          }
+          if (process.env.GITHUB_EVENT_NAME === 'workflow_dispatch' &&
+              process.env.GITHUB_REF !== 'refs/heads/main') {
+            throw new Error('Manual publication must run from main.');
+          }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\n`);
+          NODE
+
+      - name: Install extension dependencies
+        run: npm ci
+
+      - name: Install webview dependencies
+        run: npm --prefix webview-ui ci
+
+      - name: Typecheck extension host
+        run: npx --no-install tsc --noEmit
+
+      - name: Run regression tests
+        run: npm test
+
+      - name: Build and package VSIX
+        run: npm run package -- --out extension.vsix
+
+      - name: Save validated VSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-and-podman-studio-${{ steps.version.outputs.version }}
+          path: extension.vsix
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish with Trusted Publishing
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout release tooling
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install locked publishing tools
+        run: npm ci --ignore-scripts
+
+      - name: Download validated VSIX
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-and-podman-studio-${{ needs.build.outputs.version }}
+          path: release
+
+      - name: Publish to Visual Studio Marketplace
+        run: npx --no-install vsce publish --oidc --packagePath release/extension.vsix

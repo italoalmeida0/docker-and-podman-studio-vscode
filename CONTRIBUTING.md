@@ -18,6 +18,8 @@ Thank you for your interest in contributing to **Docker and Podman Studio**!
 
 ## Local Development
 
+Use Node.js 22 or newer for development and packaging.
+
 1. Install dependencies:
    ```bash
    npm install
@@ -77,6 +79,14 @@ if ($result -ne 'passed') { throw $result }
 ```
 
 This opens a separate VS Code profile, creates one uniquely named Podman container from the local image, and removes that container afterward. Its profile and logs remain under `$testRoot`.
+
+## Publishing
+
+`.github/workflows/publish.yml` publishes to Visual Studio Marketplace using GitHub OIDC and Trusted Publishing. Configure the `ItaloAlmeida` publisher's trusted policy for repository owner `italoalmeida0`, repository `docker-and-podman-studio-vscode`, and workflow filename `publish.yml`. Leave the policy's environment empty: the workflow does not use a GitHub environment. No Marketplace PAT or repository publishing secret is required.
+
+For a release, update the version in `package.json` and `package-lock.json`, update `CHANGELOG.md`, and push the release commit to `main`. Create and push a matching `v<version>` tag to run validation, build the VSIX, and publish that exact artifact. Tags must match the manifest version and point to a commit already on `main`. The **Run workflow** button can also publish the version currently on `main`.
+
+The publishing job runs only after regression tests, type-checking, and packaging succeed. Only that job receives `id-token: write`; publishing uses `vsce --oidc`, not the GitHub token. The validated VSIX is retained as a workflow artifact for 30 days. Marketplace version numbers cannot be reused, so bump the version before a subsequent publication.
 
 ## Adding or Updating Translations
 

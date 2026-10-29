@@ -4,6 +4,26 @@ All notable changes to **Docker and Podman Studio** will be documented in this f
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-10-29
+
+### Added
+- Podman container and pod multi-selection with batch start, stop, and restart, plus individual pause and resume controls.
+- Podman Compose service scaling, including zero replicas, explicit replica-count input, and confirmation before reducing replicas.
+- Replica-aware Compose status, lifecycle controls, and log streaming, including remote Podman connections.
+- Automated Marketplace publishing through GitHub Actions and Trusted Publishing, triggered by version tags or manually from main.
+- Regression coverage and opt-in practical Podman and VS Code extension-host tests.
+
+### Fixed
+- Podman Compose Down now verifies removal and cleans up confirmed replicas left behind by the provider after runtime scaling.
+- Safer image, network, and volume removal without forcing deletion of resources in use.
+- Correct paused and restarting states, exposed-only ports, and protection for Podman infra containers.
+- Command argument handling, custom executable paths, timeout handling, provider fallback, and registry logout error reporting.
+- Log buffering, UTF-8 decoding, stream cancellation, stale status updates, and overlapping operation state.
+
+### Changed
+- Windows Podman commands require native executables or PowerShell scripts; unsafe `.cmd` and `.bat` wrappers are rejected.
+- Development and publishing tools now require Node.js 22 or newer.
+
 ## [1.0.0] - 2026-10-29
 
 ### Added
