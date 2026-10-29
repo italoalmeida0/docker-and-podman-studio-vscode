@@ -30,6 +30,9 @@ jobs:
       - name: Typecheck extension host
         run: npx tsc --noEmit
 
+      - name: Run regression tests
+        run: npm test
+
       - name: Build webview-ui & extension bundle
         run: npm run build:all
 

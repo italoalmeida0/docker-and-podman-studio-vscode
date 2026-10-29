@@ -88,7 +88,15 @@ export async function withStatus<T>(operation: string, task: () => Promise<T>): 
   try {
     bar.showStatus(`${engine}: ${operation}...`, 'loading');
     const result = await task();
-    bar.showStatus(`${engine}: ${bt('opCompleted', { op: operation })}`, 'done');
+    const failed =
+      typeof result === 'object' &&
+      result !== null &&
+      'success' in result &&
+      result.success === false;
+    bar.showStatus(
+      `${engine}: ${bt(failed ? 'opFailed' : 'opCompleted', { op: operation })}`,
+      failed ? 'error' : 'done'
+    );
     return result;
   } catch (err) {
     bar.showStatus(`${engine}: ${bt('opFailed', { op: operation })}`, 'error');

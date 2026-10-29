@@ -1,0 +1,4 @@
+name: studio-fixture-project
+services:
+  app:
+    image: docker.io/library/alpine:latest

@@ -1,7 +1,9 @@
 import { ChildProcess, spawn } from 'child_process';
+import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { ContainerEngine, getConfig, getEngineLabel } from '../config';
+import { parse as parseYaml } from 'yaml';
+import { ContainerEngine, getConfig, getEngineLabel, getPodmanComposeSettingsKey } from '../config';
 import {
   CommandResult,
   ComposeContainerStatus,
@@ -18,11 +20,23 @@ import {
   PodmanSystemInfo,
   PodmanVolume,
   PortMapping,
+  PodmanBatchAction,
+  PodmanBatchItemResult,
+  PodmanBatchResource,
   ServiceStatus,
 } from '../types';
 
 const QUERY_TIMEOUT_MS = 20_000;
 const ACTION_TIMEOUT_MS = 300_000; // 5 min for pulls/builds/machine start
+const POWERSHELL_PAYLOAD = 'DOCKER_PODMAN_STUDIO_SCRIPT_ARGS';
+const POWERSHELL_COMMAND = [
+  '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false);',
+  `$payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:${POWERSHELL_PAYLOAD})) | ConvertFrom-Json;`,
+  '$arguments = @($payload.args);',
+  '& $payload.bin @arguments;',
+  'if (-not $?) { exit 1 };',
+  'if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }',
+].join(' ');
 
 function normalizeFsPath(p: string): string {
   const resolved = path.normalize(p.trim());
@@ -84,6 +98,93 @@ function stripShaPrefix(id: string): string {
   return id.replace(/^sha256:/i, '');
 }
 
+function splitCommandLine(command: string): string[] {
+  const args: string[] = [];
+  let token = '';
+  let inToken = false;
+  let quote: "'" | '"' | undefined;
+
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i];
+    if (quote === "'") {
+      if (char === "'") {
+        quote = undefined;
+      } else {
+        token += char;
+      }
+    } else if (char === '\\') {
+      const next = command[i + 1];
+      if (next === undefined) {
+        throw new Error('Container command ends with an incomplete escape.');
+      }
+      if (!quote || /["\\$`]/.test(next)) {
+        token += next;
+        i++;
+      } else {
+        token += char;
+      }
+      inToken = true;
+    } else if (quote === '"') {
+      if (char === '"') {
+        quote = undefined;
+      } else {
+        token += char;
+      }
+    } else if (char === "'" || char === '"') {
+      quote = char;
+      inToken = true;
+    } else if (/\s/.test(char)) {
+      if (inToken) {
+        args.push(token);
+        token = '';
+        inToken = false;
+      }
+    } else {
+      token += char;
+      inToken = true;
+    }
+  }
+
+  if (quote) {
+    throw new Error('Container command contains an unterminated quote.');
+  }
+  if (inToken) {
+    args.push(token);
+  }
+  return args;
+}
+
+function stopTimeoutSeconds(definition: unknown): number | undefined {
+  if (!definition || typeof definition !== 'object' || !('stop_grace_period' in definition)) {
+    return undefined;
+  }
+  const raw = definition.stop_grace_period;
+  if (typeof raw !== 'string' || !raw.trim()) {
+    throw new Error('Compose stop_grace_period must be a duration string.');
+  }
+  if (raw.trim() === '0') {
+    return 0;
+  }
+  const units: Record<string, number> = {
+    h: 3600, m: 60, s: 1, ms: 0.001, us: 0.000001, ns: 0.000000001,
+  };
+  let seconds = 0;
+  let consumed = '';
+  for (const match of raw.trim().matchAll(/(\d+(?:\.\d+)?)(ms|us|ns|h|m|s)/g)) {
+    consumed += match[0];
+    seconds += Number(match[1]) * units[match[2]];
+  }
+  if (consumed !== raw.trim() || !Number.isSafeInteger(Math.ceil(seconds))) {
+    throw new Error(`Unsupported Compose stop_grace_period: ${raw}`);
+  }
+  return Math.ceil(seconds);
+}
+
+export interface ComposeLogStream {
+  process: ChildProcess;
+  containerName?: string;
+}
+
 export class PodmanService {
   public getActiveEngine(): ContainerEngine {
     return getConfig().engine;
@@ -125,8 +226,18 @@ export class PodmanService {
     return Math.round(val * mult);
   }
 
-  public parseStatus(stateRaw: string, statusRaw = ''): ServiceStatus {
+  public parseStatus(
+    stateRaw: string,
+    statusRaw = '',
+    engine = this.getActiveEngine()
+  ): ServiceStatus {
     const s = `${stateRaw || ''} ${statusRaw || ''}`.toLowerCase();
+    if (engine === 'podman' && s.includes('paused')) {
+      return 'paused';
+    }
+    if (engine === 'podman' && s.includes('restarting')) {
+      return 'restarting';
+    }
     if (s.includes('unhealthy')) {
       return 'unhealthy';
     }
@@ -162,12 +273,15 @@ export class PodmanService {
     if (Array.isArray(rawPorts)) {
       const mappings: PortMapping[] = rawPorts
         .filter((p) => p && (p.host_port || p.PublishedPort || p.container_port || p.TargetPort))
-        .map((p) => ({
-          hostIp: p.host_ip || '0.0.0.0',
-          host: String(p.host_port ?? p.PublishedPort ?? p.container_port ?? ''),
-          container: String(p.container_port ?? p.TargetPort ?? ''),
-          protocol: String(p.protocol ?? p.Protocol ?? 'tcp'),
-        }));
+        .map((p) => {
+          const hostPort = p.host_port ?? p.PublishedPort;
+          return {
+            hostIp: p.host_ip || p.HostIP || '0.0.0.0',
+            host: Number(hostPort) > 0 ? String(hostPort) : '',
+            container: String(p.container_port ?? p.TargetPort ?? ''),
+            protocol: String(p.protocol ?? p.Protocol ?? 'tcp'),
+          };
+        });
       const display = mappings
         .map((m) =>
           m.host
@@ -211,8 +325,8 @@ export class PodmanService {
       return { bin: raw, baseArgs: [] };
     }
     const raw = cfg.podmanPath.trim() || 'podman';
-    if (raw.includes(' --remote')) {
-      const clean = raw.replace('--remote', '').trim();
+    if (/\s--remote$/.test(raw)) {
+      const clean = raw.replace(/\s+--remote$/, '').trim();
       return { bin: clean || 'podman', baseArgs: ['--remote'] };
     }
     return { bin: raw, baseArgs: [] };
@@ -227,12 +341,14 @@ export class PodmanService {
     args: string[],
     options?: { timeoutMs?: number; cwd?: string; stdin?: string; engineOverride?: ContainerEngine }
   ): Promise<CommandResult> {
-    const { bin, baseArgs } = this.getEngineExecutable(options?.engineOverride);
+    const engine = options?.engineOverride ?? this.getActiveEngine();
+    const { bin, baseArgs } = this.getEngineExecutable(engine);
     const fullArgs = [...baseArgs, ...args];
     return this.spawnProcess(bin, fullArgs, {
       timeoutMs: options?.timeoutMs ?? QUERY_TIMEOUT_MS,
       cwd: options?.cwd,
       stdin: options?.stdin,
+      engine,
     });
   }
 
@@ -240,7 +356,7 @@ export class PodmanService {
     args: string[],
     options?: { timeoutMs?: number; cwd?: string; stdin?: string }
   ): Promise<CommandResult> {
-    return this.runEngineCommand(args, options);
+    return this.runEngineCommand(args, { ...options, engineOverride: 'podman' });
   }
 
   private buildComposeInvocation(
@@ -262,11 +378,26 @@ export class PodmanService {
         .replace(/[^a-z0-9_-]/g, '') ||
       'default';
 
-    if (style === 'custom' && cfg.composePath.trim()) {
+    if (style === 'custom' && engine === 'docker' && cfg.composePath.trim()) {
       const parts = cfg.composePath.trim().split(/\s+/);
       return {
         bin: parts[0],
         args: [...parts.slice(1), '-f', fileName, '-p', proj, ...subArgs],
+        cwd,
+      };
+    }
+    if (style === 'custom' && engine === 'podman') {
+      if (!cfg.composePath.trim()) {
+        throw new Error('A custom Compose executable path is required.');
+      }
+      return {
+        bin: cfg.composePath.trim(),
+        args: [
+          '-f',
+          fileName,
+          ...(projectName ? ['-p', projectName] : []),
+          ...subArgs,
+        ],
         cwd,
       };
     }
@@ -299,16 +430,33 @@ export class PodmanService {
       const { bin, baseArgs } = this.getEngineExecutable('podman');
       return {
         bin,
-        args: [...baseArgs, 'compose', '-f', fileName, '-p', proj, ...subArgs],
+        args: [
+          ...baseArgs,
+          'compose',
+          '-f',
+          fileName,
+          ...(projectName ? ['-p', projectName] : []),
+          ...subArgs,
+        ],
         cwd,
       };
     }
 
     // Default ('auto' or 'standalone') for Podman: `podman-compose`
     const composeBin = cfg.composePath.trim() || 'podman-compose';
+    const podman = this.getEngineExecutable('podman');
     return {
       bin: composeBin,
-      args: [...inPodArgs, '-f', fileName, '-p', proj, ...subArgs],
+      args: [
+        ...inPodArgs,
+        '--podman-path',
+        podman.bin,
+        ...podman.baseArgs.map((arg) => `--podman-args=${arg}`),
+        '-f',
+        fileName,
+        ...(projectName ? ['-p', projectName] : []),
+        ...subArgs,
+      ],
       cwd,
     };
   }
@@ -324,6 +472,7 @@ export class PodmanService {
     const res = await this.spawnProcess(inv.bin, inv.args, {
       cwd: inv.cwd,
       timeoutMs,
+      engine: cfg.engine,
     });
 
     // Smart fallback in 'auto' mode if standalone/plugin binary is missing
@@ -331,34 +480,68 @@ export class PodmanService {
       const errLower = (res.stderr || '').toLowerCase();
       if (
         cfg.engine === 'podman' &&
-        (res.exitCode === -1 || errLower.includes('enoent') || errLower.includes('not recognized'))
+        res.errorCode === 'ENOENT'
       ) {
         const fallback = this.buildComposeInvocation(composeFile, subArgs, projectName, 'plugin');
-        return this.spawnProcess(fallback.bin, fallback.args, { cwd: fallback.cwd, timeoutMs });
+        return this.spawnProcess(fallback.bin, fallback.args, {
+          cwd: fallback.cwd, timeoutMs, engine: cfg.engine,
+        });
       }
       if (cfg.engine === 'docker' && errLower.includes('is not a docker command')) {
         const fallback = this.buildComposeInvocation(composeFile, subArgs, projectName, 'standalone');
-        return this.spawnProcess(fallback.bin, fallback.args, { cwd: fallback.cwd, timeoutMs });
+        return this.spawnProcess(fallback.bin, fallback.args, {
+          cwd: fallback.cwd, timeoutMs, engine: cfg.engine,
+        });
       }
     }
 
     return res;
   }
 
+  private getProcessInvocation(
+    bin: string,
+    args: string[],
+    engine: ContainerEngine
+  ): { bin: string; args: string[]; env?: Record<string, string> } {
+    if (process.platform === 'win32' && engine === 'podman') {
+      if (/\.(cmd|bat)$/i.test(bin)) {
+        throw new Error(
+          'Windows batch wrappers (.cmd and .bat) are not supported for Podman commands. ' +
+          'Configure a native executable or a PowerShell script instead.'
+        );
+      }
+      if (/\.ps1$/i.test(bin)) {
+        // Keep script arguments out of PowerShell's command text and preserve UTF-8 output.
+        return {
+          bin: 'powershell.exe',
+          args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', POWERSHELL_COMMAND],
+          env: {
+            [POWERSHELL_PAYLOAD]: Buffer.from(JSON.stringify({ bin, args }), 'utf-8').toString('base64'),
+          },
+        };
+      }
+    }
+    return { bin, args };
+  }
+
   private spawnProcess(
     bin: string,
     args: string[],
-    options: { cwd?: string; timeoutMs: number; stdin?: string }
+    options: { cwd?: string; timeoutMs: number; stdin?: string; engine?: ContainerEngine }
   ): Promise<CommandResult> {
     return new Promise((resolve) => {
       const cmdStr = `${bin} ${args.map((a) => (a.includes(' ') ? `"${a}"` : a)).join(' ')}`;
-      const useShell = process.platform === 'win32' && /\.(cmd|bat|ps1)$/i.test(bin);
+      const engine = options.engine ?? this.getActiveEngine();
       let child: ChildProcess;
       try {
-        child = spawn(bin, args, {
+        const invocation = this.getProcessInvocation(bin, args, engine);
+        const useShell =
+          engine !== 'podman' && process.platform === 'win32' && /\.(cmd|bat|ps1)$/i.test(bin);
+        child = spawn(invocation.bin, invocation.args, {
           cwd: options.cwd,
           windowsHide: true,
           shell: useShell,
+          env: invocation.env ? { ...process.env, ...invocation.env } : undefined,
         });
       } catch (err: any) {
         resolve({
@@ -367,6 +550,7 @@ export class PodmanService {
           stderr: err?.message || String(err),
           exitCode: -1,
           commandStr: cmdStr,
+          errorCode: err?.code,
         });
         return;
       }
@@ -374,6 +558,8 @@ export class PodmanService {
       let stdout = '';
       let stderr = '';
 
+      child.stdout?.setEncoding('utf8');
+      child.stderr?.setEncoding('utf8');
       child.stdout?.on('data', (chunk) => {
         stdout += chunk.toString();
       });
@@ -389,6 +575,7 @@ export class PodmanService {
           stderr: `${stderr}\nExecution timed out (${Math.round(options.timeoutMs / 1000)}s).`.trim(),
           exitCode: -1,
           commandStr: cmdStr,
+          errorCode: 'ETIMEDOUT',
         });
       }, options.timeoutMs);
 
@@ -411,28 +598,56 @@ export class PodmanService {
           stderr: err.message,
           exitCode: -1,
           commandStr: cmdStr,
+          errorCode: (err as NodeJS.ErrnoException).code,
         });
       });
 
-      if (options.stdin !== undefined && child.stdin) {
+      if (child.stdin) {
+        child.stdin.on('error', (err) => {
+          stderr += `\nFailed to write to process stdin: ${err.message}`;
+        });
         child.stdin.end(options.stdin);
       }
     });
   }
 
-  private safeJsonArray(raw: string): any[] {
+  private requireQuerySuccess(
+    result: CommandResult,
+    description: string,
+    engine = this.getActiveEngine()
+  ): void {
+    if (!result.success && engine === 'podman') {
+      throw new Error(
+        `${description}: ${(result.stderr || result.stdout || `exit code ${result.exitCode}`).trim()}`
+      );
+    }
+  }
+
+  private safeJsonArray(raw: string, engine = this.getActiveEngine()): any[] {
+    const strict = engine === 'podman';
     const trimmed = (raw || '').trim();
-    if (!trimmed || trimmed === 'null') {
+    if (trimmed === 'null') {
+      return [];
+    }
+    if (!trimmed) {
+      if (strict) {
+        throw new Error('Podman returned an empty JSON response.');
+      }
       return [];
     }
     try {
       const parsed = JSON.parse(trimmed);
       if (Array.isArray(parsed)) {
+        if (strict && parsed.some((item) => !item || typeof item !== 'object' || Array.isArray(item))) {
+          throw new Error('Expected an array of JSON objects.');
+        }
         return parsed;
+      }
+      if (!parsed || typeof parsed !== 'object') {
+        throw new Error('Expected a JSON object or array.');
       }
       return [parsed];
     } catch {
-      // Fallback: NDJSON line-by-line (standard Docker CLI JSON format)
       const out: any[] = [];
       for (const line of trimmed.split(/\r?\n/)) {
         const l = line.trim();
@@ -440,10 +655,19 @@ export class PodmanService {
           continue;
         }
         try {
-          out.push(JSON.parse(l));
+          const parsed = JSON.parse(l);
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            throw new Error('Expected a JSON object.');
+          }
+          out.push(parsed);
         } catch {
-          // ignore non-json lines
+          if (strict) {
+            throw new Error('Podman returned an invalid JSON response.');
+          }
         }
+      }
+      if (strict && out.length === 0) {
+        throw new Error('Podman returned an invalid JSON response.');
       }
       return out;
     }
@@ -453,6 +677,38 @@ export class PodmanService {
 
   private async getComposeVersionString(engine: ContainerEngine): Promise<string> {
     const cfg = getConfig();
+    if (engine === 'podman') {
+      const pluginVersion = async () => {
+        const result = await this.runEngineCommand(['compose', 'version'], {
+          timeoutMs: 8000,
+          engineOverride: 'podman',
+        });
+        return result.success ? result.stdout.trim().split(/\r?\n/).pop() || '' : '';
+      };
+      if (cfg.composeCommandStyle === 'plugin') {
+        return pluginVersion();
+      }
+      const bin = cfg.composePath.trim() ||
+        (cfg.composeCommandStyle === 'custom' ? '' : 'podman-compose');
+      if (!bin) {
+        return '';
+      }
+      const result = await this.spawnProcess(bin, ['--version'], {
+        timeoutMs: 8000,
+        engine: 'podman',
+      });
+      if (result.success && result.stdout.trim()) {
+        const lines = result.stdout.split(/\r?\n/).map((line) => line.trim())
+          .filter((line) => line.toLowerCase().includes('compose'));
+        return lines[lines.length - 1] || result.stdout.trim().split(/\r?\n/).pop() || '';
+      }
+      if (cfg.composeCommandStyle === 'auto' && !cfg.composePath.trim() &&
+          result.errorCode === 'ENOENT') {
+        return pluginVersion();
+      }
+      return '';
+    }
+
     if (cfg.composePath.trim()) {
       const customRes = await this.spawnProcess(cfg.composePath.trim(), ['--version'], {
         timeoutMs: 8000,
@@ -475,23 +731,7 @@ export class PodmanService {
       return standaloneRes.success ? standaloneRes.stdout.trim().split(/\r?\n/)[0] : '';
     }
 
-    const podmanComposeRes = await this.spawnProcess('podman-compose', ['--version'], {
-      timeoutMs: 8000,
-    });
-    if (podmanComposeRes.success && podmanComposeRes.stdout.trim()) {
-      const lines = podmanComposeRes.stdout
-        .split(/\r?\n/)
-        .map((l) => l.trim())
-        .filter((l) => l.toLowerCase().includes('compose'));
-      return (
-        lines[lines.length - 1] || podmanComposeRes.stdout.trim().split(/\r?\n/).pop() || ''
-      );
-    }
-    const subRes = await this.runEngineCommand(['compose', 'version'], {
-      timeoutMs: 8000,
-      engineOverride: 'podman',
-    });
-    return subRes.success ? subRes.stdout.trim().split(/\r?\n/).pop() || '' : '';
+    return '';
   }
 
   public async getSystemInfo(): Promise<PodmanSystemInfo> {
@@ -506,6 +746,14 @@ export class PodmanService {
         : Promise.resolve({ success: false, stdout: '', stderr: '', exitCode: 0 }),
       this.getComposeVersionString(engine),
     ]);
+    this.requireQuerySuccess(infoRes, 'Podman system information', engine);
+    if (engine === 'podman') {
+      this.requireQuerySuccess(verRes, 'Podman version', engine);
+      this.requireQuerySuccess(podsRes, 'Podman pod list', engine);
+      if (!infoRes.stdout.trim() || !verRes.stdout.trim()) {
+        throw new Error('Podman returned empty system information or version output.');
+      }
+    }
 
     const info: PodmanSystemInfo = {
       engine,
@@ -532,8 +780,11 @@ export class PodmanService {
     };
 
     if (infoRes.success && infoRes.stdout.trim()) {
-      const parsed = this.safeJsonArray(infoRes.stdout);
+      const parsed = this.safeJsonArray(infoRes.stdout, engine);
       const data = parsed[0];
+      if (engine === 'podman' && !data) {
+        throw new Error('Podman returned invalid system information.');
+      }
       if (data && typeof data === 'object') {
         const host = data.host || {};
         const store = data.store || {};
@@ -563,7 +814,7 @@ export class PodmanService {
     }
 
     if (verRes.success && verRes.stdout.trim()) {
-      const parsed = this.safeJsonArray(verRes.stdout);
+      const parsed = this.safeJsonArray(verRes.stdout, engine);
       const v = parsed[0];
       if (v && typeof v === 'object') {
         const ver = v.Server?.Version || v.Client?.Version || info.engineVersion || '';
@@ -579,9 +830,12 @@ export class PodmanService {
     }
 
     info.podmanVersion = info.engineVersion;
+    if (engine === 'podman' && !info.engineVersion) {
+      throw new Error('Podman version output did not contain a version.');
+    }
 
     if (engine === 'podman' && podsRes.success) {
-      const pods = this.safeJsonArray(podsRes.stdout);
+      const pods = this.safeJsonArray(podsRes.stdout, engine);
       info.podsTotal = pods.length;
       info.podsRunning = pods.filter((p) =>
         String(p.Status || '').toLowerCase().includes('running')
@@ -592,7 +846,9 @@ export class PodmanService {
   }
 
   public async getDiskUsage(): Promise<PodmanDiskUsageItem[]> {
-    const res = await this.runEngineCommand(['system', 'df']);
+    const engine = this.getActiveEngine();
+    const res = await this.runEngineCommand(['system', 'df'], { engineOverride: engine });
+    this.requireQuerySuccess(res, 'Podman disk usage', engine);
     if (!res.success || !res.stdout.trim()) {
       return [];
     }
@@ -630,7 +886,7 @@ export class PodmanService {
     if (!res.success) {
       return [];
     }
-    return this.safeJsonArray(res.stdout).map((c) => ({
+    return this.safeJsonArray(res.stdout, 'docker').map((c) => ({
       name: String(c.Name || c.name || '').replace(/\*$/, '').trim(),
       description: String(c.Description || c.description || ''),
       dockerEndpoint: String(c.DockerEndpoint || c.dockerEndpoint || ''),
@@ -653,10 +909,11 @@ export class PodmanService {
     const res = await this.runEngineCommand(['machine', 'list', '--format', 'json'], {
       engineOverride: 'podman',
     });
+    this.requireQuerySuccess(res, 'Podman machine list', 'podman');
     if (!res.success) {
       return [];
     }
-    return this.safeJsonArray(res.stdout).map((m) => ({
+    return this.safeJsonArray(res.stdout, 'podman').map((m) => ({
       name: String(m.Name || m.name || '').replace(/\*$/, ''),
       default: parseBool(m.Default ?? m.default),
       running: parseBool(m.Running ?? m.running),
@@ -688,7 +945,10 @@ export class PodmanService {
 
   public async restartMachine(name?: string): Promise<CommandResult> {
     const target = name || getConfig().machineName;
-    await this.stopMachine(target);
+    const stopped = await this.stopMachine(target);
+    if (!stopped.success) {
+      return stopped;
+    }
     return this.startMachine(target);
   }
 
@@ -701,10 +961,11 @@ export class PodmanService {
     const res = await this.runEngineCommand(['pod', 'ls', '--format', 'json'], {
       engineOverride: 'podman',
     });
+    this.requireQuerySuccess(res, 'Podman pod list', 'podman');
     if (!res.success) {
       return [];
     }
-    return this.safeJsonArray(res.stdout).map((p) => {
+    return this.safeJsonArray(res.stdout, 'podman').map((p) => {
       const fullId = String(p.Id || p.ID || '');
       const status = String(p.Status || '');
       const containers = Array.isArray(p.Containers)
@@ -720,7 +981,7 @@ export class PodmanService {
         fullId,
         name: String(p.Name || ''),
         status,
-        state: this.parseStatus(status),
+        state: this.parseStatus(status, '', 'podman'),
         created: String(p.Created || ''),
         infraId: String(p.InfraId || '').substring(0, 12),
         networks: parseCsvOrArray(p.Networks),
@@ -786,6 +1047,20 @@ export class PodmanService {
     });
   }
 
+  public async pausePod(podId: string): Promise<CommandResult> {
+    return this.runEngineCommand(['pod', 'pause', podId], {
+      timeoutMs: ACTION_TIMEOUT_MS,
+      engineOverride: 'podman',
+    });
+  }
+
+  public async unpausePod(podId: string): Promise<CommandResult> {
+    return this.runEngineCommand(['pod', 'unpause', podId], {
+      timeoutMs: ACTION_TIMEOUT_MS,
+      engineOverride: 'podman',
+    });
+  }
+
   public async removePod(podId: string, force = true): Promise<CommandResult> {
     const args = ['pod', 'rm'];
     if (force) {
@@ -799,9 +1074,75 @@ export class PodmanService {
   }
 
   public async getPodLogs(podId: string, tail = 200): Promise<CommandResult> {
-    return this.runEngineCommand(['pod', 'logs', '--tail', String(tail), podId], {
+    const inspection = await this.runEngineCommand(['pod', 'inspect', podId, '--format', 'json'], {
       engineOverride: 'podman',
     });
+    if (!inspection.success) {
+      return inspection;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(inspection.stdout);
+    } catch (error) {
+      throw new Error(`Invalid Podman pod inspection JSON: ${String(error)}`);
+    }
+    const pod: unknown = Array.isArray(parsed) ? parsed[0] : parsed;
+    if (!pod || typeof pod !== 'object' || !('Containers' in pod) ||
+        !Array.isArray(pod.Containers)) {
+      throw new Error('Invalid Podman pod inspection: missing container list.');
+    }
+    const infraId = 'InfraContainerID' in pod && typeof pod.InfraContainerID === 'string'
+      ? pod.InfraContainerID.toLowerCase()
+      : '';
+    if ('CreateInfra' in pod && pod.CreateInfra === true && !infraId) {
+      throw new Error('Invalid Podman pod inspection: missing infra container ID.');
+    }
+
+    const output: string[] = [];
+    const failures: string[] = [];
+    let firstFailure: CommandResult | undefined;
+    const containers: unknown[] = pod.Containers;
+    for (const container of containers) {
+      if (!container || typeof container !== 'object' ||
+          !('Id' in container) || typeof container.Id !== 'string' ||
+          !/^[a-f0-9]{12,64}$/i.test(container.Id)) {
+        throw new Error('Invalid Podman pod inspection: invalid container ID.');
+      }
+      if (container.Id.toLowerCase() === infraId) {
+        continue;
+      }
+      const name = 'Name' in container && typeof container.Name === 'string' && container.Name
+        ? container.Name
+        : container.Id.substring(0, 12);
+      const result = await this.runEngineCommand(
+        ['logs', '--tail', String(tail), container.Id],
+        { engineOverride: 'podman' }
+      );
+      const appendLines = (text: string) => {
+        if (text) {
+          output.push(text.replace(/\r\n/g, '\n').replace(/\n$/, '')
+            .split('\n').map((line) => `[${name}] ${line}`).join('\n'));
+        }
+      };
+      appendLines(result.stdout);
+      if (result.success) {
+        appendLines(result.stderr);
+      } else {
+        firstFailure ??= result;
+        failures.push(`${name}: ${(result.stderr || `exit code ${result.exitCode}`).trim()}`);
+      }
+    }
+    if (firstFailure) {
+      return {
+        success: false,
+        stdout: output.join('\n'),
+        stderr: failures.join('\n'),
+        exitCode: firstFailure.exitCode,
+        commandStr: firstFailure.commandStr,
+      };
+    }
+    return { success: true, stdout: output.join('\n'), stderr: '', exitCode: 0 };
   }
 
   // ==================== CONTAINERS ====================
@@ -811,11 +1152,15 @@ export class PodmanService {
     const res = await this.runEngineCommand(['ps', '-a', ...this.getJsonFormatArgs(engine)], {
       engineOverride: engine,
     });
+    this.requireQuerySuccess(res, 'Podman container list', engine);
     if (!res.success) {
       return [];
     }
-    return this.safeJsonArray(res.stdout).map((n) => {
+    return this.safeJsonArray(res.stdout, engine).map((n) => {
       const fullId = stripShaPrefix(String(n.Id || n.ID || ''));
+      if (engine === 'podman' && !/^[a-f0-9]{12,64}$/i.test(fullId)) {
+        throw new Error('Podman container list returned an invalid container ID.');
+      }
       const rawNames = n.Names ?? n.Name ?? '';
       const nameStr = Array.isArray(rawNames)
         ? String(rawNames[0] || fullId.substring(0, 12))
@@ -829,17 +1174,15 @@ export class PodmanService {
         labels['com.docker.compose.project'] || labels['io.podman.compose.project'] || '';
       const composeService =
         labels['com.docker.compose.service'] || labels['io.podman.compose.service'] || '';
+      const replica = Number(labels['com.docker.compose.container-number']);
       const workDir = labels['com.docker.compose.project.working_dir'] || '';
       const cfgFile = labels['com.docker.compose.project.config_files'] || '';
-      let composeFile = '';
-      if (cfgFile) {
-        const firstCfg = cfgFile.split(',')[0].trim();
-        composeFile = path.isAbsolute(firstCfg)
-          ? firstCfg
-          : workDir
-            ? path.join(workDir, firstCfg)
-            : firstCfg;
-      }
+      const composeFiles = cfgFile
+        .split(',')
+        .map((file) => file.trim())
+        .filter(Boolean)
+        .map((file) => path.isAbsolute(file) ? file : workDir ? path.join(workDir, file) : file);
+      const composeFile = composeFiles[0] || '';
 
       const { mappings, display } = this.parsePodmanPorts(n.Ports);
       const statusStr = String(n.Status || n.State || '');
@@ -852,7 +1195,7 @@ export class PodmanService {
         image: String(n.Image || ''),
         imageId: stripShaPrefix(String(n.ImageID || '')).substring(0, 12),
         status: statusStr || stateStr,
-        state: this.parseStatus(stateStr, statusStr),
+        state: this.parseStatus(stateStr, statusStr, engine),
         ports: display,
         portMappings: mappings,
         created: String(n.CreatedAt || n.RunningFor || ''),
@@ -861,7 +1204,9 @@ export class PodmanService {
         isCompose: Boolean(composeProject),
         composeProject,
         composeService,
+        composeReplica: Number.isSafeInteger(replica) && replica > 0 ? replica : undefined,
         composeFile,
+        composeFiles,
         networks: parseCsvOrArray(n.Networks),
         mounts: parseCsvOrArray(n.Mounts),
         command: Array.isArray(n.Command)
@@ -874,6 +1219,12 @@ export class PodmanService {
 
   public async createContainer(opts: CreateContainerOptions): Promise<CommandResult> {
     const engine = this.getActiveEngine();
+    if (!opts.image?.trim()) {
+      throw new Error('An image is required to create a container.');
+    }
+    if (engine === 'podman' && opts.pod?.trim() && opts.ports?.some((port) => port.trim())) {
+      throw new Error('Publish ports on the pod instead of on a container attached to that pod.');
+    }
     const args = ['run', '-d'];
     if (opts.name?.trim()) {
       args.push('--name', opts.name.trim());
@@ -915,7 +1266,9 @@ export class PodmanService {
     }
     args.push(opts.image.trim());
     if (opts.command?.trim()) {
-      const cmdParts = opts.command.trim().split(/\s+/);
+      const cmdParts = engine === 'podman'
+        ? splitCommandLine(opts.command.trim())
+        : opts.command.trim().split(/\s+/);
       args.push(...cmdParts);
     }
     return this.runEngineCommand(args, { timeoutMs: ACTION_TIMEOUT_MS, engineOverride: engine });
@@ -933,6 +1286,62 @@ export class PodmanService {
     return this.runEngineCommand(['container', 'restart', id], { timeoutMs: ACTION_TIMEOUT_MS });
   }
 
+  public async pauseContainer(id: string): Promise<CommandResult> {
+    return this.runEngineCommand(['container', 'pause', id], {
+      timeoutMs: ACTION_TIMEOUT_MS,
+      engineOverride: 'podman',
+    });
+  }
+
+  public async unpauseContainer(id: string): Promise<CommandResult> {
+    return this.runEngineCommand(['container', 'unpause', id], {
+      timeoutMs: ACTION_TIMEOUT_MS,
+      engineOverride: 'podman',
+    });
+  }
+
+  public async runPodmanBatch(
+    resource: PodmanBatchResource,
+    action: PodmanBatchAction,
+    ids: string[]
+  ): Promise<PodmanBatchItemResult[]> {
+    if (!this.isPodman()) {
+      throw new Error('Batch operations require Podman to be the active engine.');
+    }
+    if (
+      (resource !== 'container' && resource !== 'pod') ||
+      (action !== 'start' && action !== 'stop' && action !== 'restart') ||
+      !Array.isArray(ids) ||
+      ids.length === 0 ||
+      ids.some((id) => typeof id !== 'string' || !/^[a-f0-9]{12,64}$/i.test(id))
+    ) {
+      throw new Error('Invalid Podman batch operation or resource IDs.');
+    }
+
+    const uniqueIds = Array.from(new Set(ids.map((id) => id.toLowerCase())));
+    const available =
+      resource === 'container' ? await this.listAllContainers() : await this.listPods();
+    const targets = new Map(
+      available
+        .filter((item) => resource !== 'container' || !('isInfra' in item && item.isInfra))
+        .map((item) => [item.fullId.toLowerCase(), item])
+    );
+    if (uniqueIds.some((id) => !targets.has(id))) {
+      throw new Error('A selected Podman resource no longer exists or cannot be managed. Refresh the list.');
+    }
+
+    const results: PodmanBatchItemResult[] = [];
+    for (const id of uniqueIds) {
+      const target = targets.get(id)!;
+      const result = await this.runEngineCommand([resource, action, id], {
+        timeoutMs: ACTION_TIMEOUT_MS,
+        engineOverride: 'podman',
+      });
+      results.push({ id, name: target.name, result });
+    }
+    return results;
+  }
+
   public async removeContainer(id: string, force = true): Promise<CommandResult> {
     const args = ['container', 'rm'];
     if (force) {
@@ -947,18 +1356,36 @@ export class PodmanService {
   }
 
   public streamContainerLogs(id: string, tail = 200): ChildProcess {
-    const { bin, baseArgs } = this.getEngineExecutable();
-    return spawn(bin, [...baseArgs, 'logs', '-f', '--tail', String(tail), id], {
+    const engine = this.getActiveEngine();
+    const { bin, baseArgs } = this.getEngineExecutable(engine);
+    const invocation = this.getProcessInvocation(
+      bin, [...baseArgs, 'logs', '-f', '--tail', String(tail), id], engine
+    );
+    return spawn(invocation.bin, invocation.args, {
       windowsHide: true,
+      env: invocation.env ? { ...process.env, ...invocation.env } : undefined,
     });
   }
 
   public openContainerTerminal(containerId: string, label?: string): void {
-    const { bin, baseArgs } = this.getEngineExecutable();
-    const engineLabel = getEngineLabel();
-    const cmdPrefix = [bin, ...baseArgs].join(' ');
-    const term = vscode.window.createTerminal(`${engineLabel}: ${label || containerId}`);
-    term.sendText(`${cmdPrefix} exec -it ${containerId} /bin/sh`);
+    const engine = this.getActiveEngine();
+    const { bin, baseArgs } = this.getEngineExecutable(engine);
+    const engineLabel = getEngineLabel(engine);
+    if (engine === 'docker') {
+      const term = vscode.window.createTerminal(`${engineLabel}: ${label || containerId}`);
+      term.sendText(`${[bin, ...baseArgs].join(' ')} exec -it ${containerId} /bin/sh`);
+      term.show();
+      return;
+    }
+    const invocation = this.getProcessInvocation(
+      bin, [...baseArgs, 'exec', '-it', containerId, '/bin/sh'], engine
+    );
+    const term = vscode.window.createTerminal({
+      name: `${engineLabel}: ${label || containerId}`,
+      shellPath: invocation.bin,
+      shellArgs: invocation.args,
+      env: invocation.env,
+    });
     term.show();
   }
 
@@ -969,17 +1396,33 @@ export class PodmanService {
   ): Promise<void> {
     const targetMode =
       mode || (getConfig().logsOutput === 'terminal' ? 'terminal' : 'outputChannel');
-    const { bin, baseArgs } = this.getEngineExecutable();
-    const engineLabel = getEngineLabel();
-    const cmdPrefix = [bin, ...baseArgs].join(' ');
+    const engine = this.getActiveEngine();
+    const { bin, baseArgs } = this.getEngineExecutable(engine);
+    const engineLabel = getEngineLabel(engine);
 
     if (targetMode === 'terminal') {
-      const term = vscode.window.createTerminal(`${engineLabel} Logs: ${label || containerId}`);
-      term.sendText(`${cmdPrefix} logs -f ${containerId}`);
+      if (engine === 'docker') {
+        const term = vscode.window.createTerminal(`${engineLabel} Logs: ${label || containerId}`);
+        term.sendText(`${[bin, ...baseArgs].join(' ')} logs -f ${containerId}`);
+        term.show();
+        return;
+      }
+      const invocation = this.getProcessInvocation(
+        bin, [...baseArgs, 'logs', '-f', containerId], engine
+      );
+      const term = vscode.window.createTerminal({
+        name: `${engineLabel} Logs: ${label || containerId}`,
+        shellPath: invocation.bin,
+        shellArgs: invocation.args,
+        env: invocation.env,
+      });
       term.show();
       return;
     }
     const res = await this.getContainerLogHistory(containerId, 500);
+    if (!res.success) {
+      throw new Error(res.stderr || `Failed to read container logs: ${containerId}`);
+    }
     const channel = vscode.window.createOutputChannel(
       `${engineLabel} Logs: ${label || containerId}`
     );
@@ -1004,11 +1447,12 @@ export class PodmanService {
       knownContainers ? Promise.resolve(knownContainers) : this.listAllContainers(),
     ]);
     if (!res.success) {
+      this.requireQuerySuccess(res, 'Podman image list', engine);
       return [];
     }
 
     const items: PodmanImage[] = [];
-    for (const img of this.safeJsonArray(res.stdout)) {
+    for (const img of this.safeJsonArray(res.stdout, engine)) {
       const rawId = String(img.Id || img.ID || '');
       const cleanId = stripShaPrefix(rawId);
       const shortId = cleanId.substring(0, 12);
@@ -1093,9 +1537,19 @@ export class PodmanService {
     imageTag: string,
     contextDir?: string
   ): Promise<CommandResult> {
-    const ctx = contextDir?.trim() || path.dirname(dockerfilePath);
+    let ctx = contextDir?.trim() || path.dirname(dockerfilePath);
+    let file = dockerfilePath;
+    if (this.isPodman()) {
+      const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      const root = workspaceRoot || (path.isAbsolute(file) ? path.dirname(file) : undefined);
+      if (!path.isAbsolute(ctx) && !root) {
+        throw new Error('Open a workspace or provide an absolute build context path.');
+      }
+      ctx = path.resolve(root || ctx, ctx);
+      file = path.isAbsolute(file) ? file : path.resolve(ctx, file);
+    }
     return this.runEngineCommand(
-      ['build', '-t', imageTag.trim(), '-f', dockerfilePath, ctx],
+      ['build', '-t', imageTag.trim(), '-f', file, ctx],
       { timeoutMs: ACTION_TIMEOUT_MS, cwd: ctx }
     );
   }
@@ -1113,7 +1567,10 @@ export class PodmanService {
     return this.runEngineCommand(['push', src], { timeoutMs: ACTION_TIMEOUT_MS });
   }
 
-  public async removeImage(imageId: string, force = true): Promise<CommandResult> {
+  public async removeImage(
+    imageId: string,
+    force = this.getActiveEngine() === 'docker'
+  ): Promise<CommandResult> {
     const args = ['image', 'rm'];
     if (force) {
       args.push('-f');
@@ -1131,6 +1588,23 @@ export class PodmanService {
   }
 
   public async pruneBuilderCache(): Promise<CommandResult> {
+    if (this.isPodman()) {
+      const help = await this.runEngineCommand(['image', 'prune', '--help']);
+      if (!help.success) {
+        return help;
+      }
+      if (!help.stdout.includes('--build-cache')) {
+        return {
+          success: false,
+          stdout: '',
+          stderr: 'This Podman version does not support image prune --build-cache.',
+          exitCode: 1,
+        };
+      }
+      return this.runEngineCommand(['image', 'prune', '--build-cache', '-f'], {
+        timeoutMs: ACTION_TIMEOUT_MS,
+      });
+    }
     return this.runEngineCommand(['builder', 'prune', '-a', '-f'], {
       timeoutMs: ACTION_TIMEOUT_MS,
     });
@@ -1143,10 +1617,11 @@ export class PodmanService {
     const res = await this.runEngineCommand(['volume', 'ls', ...this.getJsonFormatArgs(engine)], {
       engineOverride: engine,
     });
+    this.requireQuerySuccess(res, 'Podman volume list', engine);
     if (!res.success) {
       return [];
     }
-    return this.safeJsonArray(res.stdout).map((v) => {
+    return this.safeJsonArray(res.stdout, engine).map((v) => {
       const labels = parseLabels(v.Labels);
       const name = String(v.Name || v.name || '');
       const isHex64 = /^[a-f0-9]{64}$/i.test(name);
@@ -1179,16 +1654,19 @@ export class PodmanService {
       }
     }
     args.push(name.trim());
-    return this.runEngineCommand(args);
+    return this.runEngineCommand(args, { timeoutMs: ACTION_TIMEOUT_MS });
   }
 
-  public async removeVolume(name: string, force = true): Promise<CommandResult> {
+  public async removeVolume(
+    name: string,
+    force = this.getActiveEngine() === 'docker'
+  ): Promise<CommandResult> {
     const args = ['volume', 'rm'];
     if (force) {
       args.push('-f');
     }
     args.push(name);
-    return this.runEngineCommand(args);
+    return this.runEngineCommand(args, { timeoutMs: ACTION_TIMEOUT_MS });
   }
 
   public async pruneVolumes(): Promise<CommandResult> {
@@ -1202,10 +1680,11 @@ export class PodmanService {
     const res = await this.runEngineCommand(['network', 'ls', ...this.getJsonFormatArgs(engine)], {
       engineOverride: engine,
     });
+    this.requireQuerySuccess(res, 'Podman network list', engine);
     if (!res.success) {
       return [];
     }
-    return this.safeJsonArray(res.stdout).map((n) => {
+    return this.safeJsonArray(res.stdout, engine).map((n) => {
       const labels = parseLabels(n.labels ?? n.Labels);
       const rawSubnets = Array.isArray(n.subnets)
         ? n.subnets
@@ -1261,17 +1740,20 @@ export class PodmanService {
       args.push('--ipv6');
     }
     args.push(opts.name.trim());
-    return this.runEngineCommand(args);
+    return this.runEngineCommand(args, { timeoutMs: ACTION_TIMEOUT_MS });
   }
 
-  public async removeNetwork(name: string, force = true): Promise<CommandResult> {
+  public async removeNetwork(
+    name: string,
+    force = this.getActiveEngine() === 'docker'
+  ): Promise<CommandResult> {
     const engine = this.getActiveEngine();
     const args = ['network', 'rm'];
     if (force && engine === 'podman') {
       args.push('-f');
     }
     args.push(name);
-    return this.runEngineCommand(args);
+    return this.runEngineCommand(args, { timeoutMs: ACTION_TIMEOUT_MS });
   }
 
   // ==================== REGISTRY AUTH ====================
@@ -1279,25 +1761,115 @@ export class PodmanService {
   public async loginRegistry(
     registryHost: string,
     username: string,
-    secret: string
+    secret: string,
+    engineOverride?: ContainerEngine
   ): Promise<CommandResult> {
     const args = ['login'];
     if (registryHost) {
       args.push(registryHost);
     }
     args.push('--username', username, '--password-stdin');
-    return this.runEngineCommand(args, { stdin: secret, timeoutMs: 30_000 });
+    return this.runEngineCommand(args, { stdin: secret, timeoutMs: 30_000, engineOverride });
   }
 
-  public async logoutRegistry(registryHost: string): Promise<CommandResult> {
+  public async logoutRegistry(
+    registryHost: string,
+    engineOverride?: ContainerEngine
+  ): Promise<CommandResult> {
     const args = ['logout'];
     if (registryHost) {
       args.push(registryHost);
     }
-    return this.runEngineCommand(args, { timeoutMs: 15_000 });
+    return this.runEngineCommand(args, { timeoutMs: 15_000, engineOverride });
   }
 
   // ==================== COMPOSE OPERATIONS ====================
+
+  private async getPodmanComposeTargets(
+    composeFile: string,
+    services?: string[],
+    projectName?: string,
+    includeOrphans = false
+  ) {
+    const settingsKey = getPodmanComposeSettingsKey();
+    const content = fs.readFileSync(composeFile, 'utf-8');
+    const [resolved, current] = await Promise.all([
+      this.runComposeCommand(composeFile, ['config'], QUERY_TIMEOUT_MS, projectName),
+      this.composePs(composeFile, undefined, projectName),
+    ]);
+    this.requireQuerySuccess(resolved, 'Podman Compose configuration', 'podman');
+    const parsed: unknown = parseYaml(resolved.stdout);
+    if (!parsed || typeof parsed !== 'object' || !('services' in parsed) ||
+        !parsed.services || typeof parsed.services !== 'object' || Array.isArray(parsed.services)) {
+      throw new Error('Compose must contain a services mapping.');
+    }
+    const definitions: Record<string, unknown> = Object.fromEntries(Object.entries(parsed.services));
+    const requested = services?.length ? services : Object.keys(definitions);
+    if (requested.some((service) => !Object.prototype.hasOwnProperty.call(definitions, service))) {
+      throw new Error('A requested Compose service no longer exists. Refresh the project.');
+    }
+    const selected = new Set(requested);
+    const containers = current.filter((container) => includeOrphans || selected.has(container.service));
+    const ensureUnchanged = () => {
+      if (!this.isPodman() || getPodmanComposeSettingsKey() !== settingsKey ||
+          fs.readFileSync(composeFile, 'utf-8') !== content) {
+        throw new Error('Compose settings or file changed; refresh the project before retrying.');
+      }
+    };
+    ensureUnchanged();
+    if (containers.some((container) => !/^[a-f0-9]{64}$/i.test(container.fullId)) ||
+        new Set(containers.map((container) => container.fullId)).size !== containers.length) {
+      throw new Error('Cannot safely identify the existing Compose containers.');
+    }
+    return { containers, definitions, selected, ensureUnchanged };
+  }
+
+  private async runPodmanComposeLifecycle(
+    composeFile: string,
+    action: 'start' | 'stop' | 'restart',
+    services?: string[],
+    projectName?: string
+  ): Promise<CommandResult> {
+    const targets = await this.getPodmanComposeTargets(composeFile, services, projectName);
+    const servicesWithContainers = targets.containers.map((container) => container.service);
+    if (!targets.containers.some((container) => (container.replica || 0) > 1) &&
+        new Set(servicesWithContainers).size === servicesWithContainers.length) {
+      return this.runComposeCommand(
+        composeFile, [action, ...(services || [])], ACTION_TIMEOUT_MS, projectName
+      );
+    }
+
+    // podman-compose expands names from YAML, so runtime-scaled replicas can be missed.
+    const timeouts = new Map(
+      [...targets.selected].map((service) => [
+        service, action === 'start' ? undefined : stopTimeoutSeconds(targets.definitions[service]),
+      ])
+    );
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    let firstFailure: CommandResult | undefined;
+    for (const container of targets.containers) {
+      targets.ensureUnchanged();
+      const timeout = timeouts.get(container.service);
+      const result = await this.runEngineCommand([
+        'container', action,
+        ...(timeout === undefined ? [] : ['--time', String(timeout)]),
+        container.fullId,
+      ], { timeoutMs: ACTION_TIMEOUT_MS, engineOverride: 'podman' });
+      if (result.stdout) stdout.push(result.stdout);
+      if (result.stderr) stderr.push(`${container.name}: ${result.stderr.trim()}`);
+      if (!result.success) firstFailure ??= result;
+    }
+    targets.ensureUnchanged();
+    return {
+      success: !firstFailure,
+      stdout: stdout.join('\n'),
+      stderr: stderr.join('\n'),
+      exitCode: firstFailure?.exitCode ?? 0,
+      commandStr: firstFailure?.commandStr,
+      errorCode: firstFailure?.errorCode,
+    };
+  }
 
   public async composeUp(
     composeFile: string,
@@ -1321,6 +1893,9 @@ export class PodmanService {
     services?: string[],
     projectName?: string
   ): Promise<CommandResult> {
+    if (this.isPodman()) {
+      return this.runPodmanComposeLifecycle(composeFile, 'start', services, projectName);
+    }
     const args = ['start'];
     if (services?.length) {
       args.push(...services);
@@ -1333,6 +1908,9 @@ export class PodmanService {
     services?: string[],
     projectName?: string
   ): Promise<CommandResult> {
+    if (this.isPodman()) {
+      return this.runPodmanComposeLifecycle(composeFile, 'stop', services, projectName);
+    }
     const args = ['stop'];
     if (services?.length) {
       args.push(...services);
@@ -1351,7 +1929,65 @@ export class PodmanService {
     if (opts?.removeOrphans) {
       args.push('--remove-orphans');
     }
-    return this.runComposeCommand(composeFile, args, ACTION_TIMEOUT_MS, opts?.projectName);
+    if (!this.isPodman()) {
+      return this.runComposeCommand(composeFile, args, ACTION_TIMEOUT_MS, opts?.projectName);
+    }
+    const targets = await this.getPodmanComposeTargets(
+      composeFile, undefined, opts?.projectName, opts?.removeOrphans
+    );
+    const result = await this.runComposeCommand(composeFile, args, ACTION_TIMEOUT_MS, opts?.projectName);
+    if (!result.success) {
+      return result;
+    }
+    targets.ensureUnchanged();
+    const remaining = (await this.composePs(composeFile, undefined, opts?.projectName))
+      .filter((container) => opts?.removeOrphans || targets.selected.has(container.service));
+    targets.ensureUnchanged();
+    if (remaining.length === 0) {
+      return result;
+    }
+    const knownIds = new Set(targets.containers.map((container) => container.fullId));
+    if (remaining.some((container) => !knownIds.has(container.fullId))) {
+      throw new Error('Compose containers changed during Down. Automatic cleanup was not attempted.');
+    }
+    const timeouts = new Map(remaining.map((container) => [
+      container.service, stopTimeoutSeconds(targets.definitions[container.service]),
+    ]));
+    for (const container of remaining) {
+      targets.ensureUnchanged();
+      const timeout = timeouts.get(container.service);
+      const stopped = await this.runEngineCommand([
+        'container', 'stop', ...(timeout === undefined ? [] : ['--time', String(timeout)]),
+        container.fullId,
+      ], { timeoutMs: ACTION_TIMEOUT_MS, engineOverride: 'podman' });
+      if (!stopped.success) {
+        return stopped;
+      }
+    }
+    targets.ensureUnchanged();
+    const removed = await this.runEngineCommand(
+      ['container', 'rm', ...(opts?.removeVolumes ? ['-v'] : []),
+        ...remaining.map((container) => container.fullId)],
+      { timeoutMs: ACTION_TIMEOUT_MS, engineOverride: 'podman' }
+    );
+    if (!removed.success) {
+      return removed;
+    }
+    targets.ensureUnchanged();
+    const finished = await this.runComposeCommand(composeFile, args, ACTION_TIMEOUT_MS, opts?.projectName);
+    if (!finished.success) {
+      return finished;
+    }
+    targets.ensureUnchanged();
+    const final = await this.composePs(composeFile, undefined, opts?.projectName);
+    targets.ensureUnchanged();
+    if (final.some((container) => opts?.removeOrphans || targets.selected.has(container.service))) {
+      throw new Error('Compose Down did not remove all targeted containers. Refresh the project.');
+    }
+    return {
+      ...finished,
+      stdout: [result.stdout, removed.stdout, finished.stdout].filter(Boolean).join('\n'),
+    };
   }
 
   public async composeRemoveServices(
@@ -1359,6 +1995,7 @@ export class PodmanService {
     services: string[],
     composeDoc?: ComposeDocument
   ): Promise<CommandResult> {
+    const engine = this.getActiveEngine();
     const statuses = await this.composePs(composeFile, composeDoc);
     const targets = statuses.filter((c) => services.includes(c.service) && c.fullId);
     if (targets.length === 0) {
@@ -1371,6 +2008,7 @@ export class PodmanService {
     }
     return this.runEngineCommand(['container', 'rm', '-f', ...targets.map((t) => t.fullId)], {
       timeoutMs: ACTION_TIMEOUT_MS,
+      engineOverride: engine,
     });
   }
 
@@ -1379,6 +2017,9 @@ export class PodmanService {
     services?: string[],
     projectName?: string
   ): Promise<CommandResult> {
+    if (this.isPodman()) {
+      return this.runPodmanComposeLifecycle(composeFile, 'restart', services, projectName);
+    }
     const args = ['restart'];
     if (services?.length) {
       args.push(...services);
@@ -1402,46 +2043,292 @@ export class PodmanService {
     composeFile: string,
     service: string,
     replicas: number,
-    projectName?: string
+    projectName?: string,
+    expectedContainerIds?: readonly string[],
+    expectedComposeContent?: string
   ): Promise<CommandResult> {
-    return this.runComposeCommand(
+    const engine = this.getActiveEngine();
+    if (engine === 'podman' &&
+        (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(service) ||
+          !Number.isSafeInteger(replicas) || replicas < 0)) {
+      throw new Error('Compose scaling requires a valid service name and a non-negative integer.');
+    }
+    const initialSettings = getPodmanComposeSettingsKey();
+    const initialContent = engine === 'podman' ? fs.readFileSync(composeFile, 'utf-8') : undefined;
+    if (engine === 'podman' &&
+        (getConfig().engine !== 'podman' ||
+          (expectedComposeContent !== undefined && expectedComposeContent !== initialContent))) {
+      throw new Error('Compose settings or file changed while scaling; refresh the project before retrying.');
+    }
+    const ensureContextUnchanged = () => {
+      if (getPodmanComposeSettingsKey() !== initialSettings ||
+          fs.readFileSync(composeFile, 'utf-8') !== initialContent) {
+        throw new Error('Compose settings or file changed while scaling; refresh the project before retrying.');
+      }
+    };
+    let beforeIds = new Set<string>();
+    if (engine === 'podman') {
+      const before = (await this.composePs(composeFile, undefined, projectName))
+        .filter((container) => container.service === service);
+      ensureContextUnchanged();
+      beforeIds = new Set(before.map((container) => container.fullId.toLowerCase()));
+      if (beforeIds.size !== before.length ||
+          before.some((container) => !/^[a-f0-9]{64}$/i.test(container.fullId))) {
+        throw new Error('Cannot safely identify the existing Compose replicas.');
+      }
+      if (expectedContainerIds) {
+        const expected = new Set(expectedContainerIds.map((id) => id.toLowerCase()));
+        if (expected.size !== expectedContainerIds.length ||
+            expected.size !== beforeIds.size ||
+            [...expected].some((id) => !beforeIds.has(id))) {
+          throw new Error('Compose replicas changed before scaling; refresh and try again.');
+        }
+      }
+      if (replicas === 0) {
+        if (beforeIds.size === 0) {
+          return { success: true, stdout: 'No replicas to remove.', stderr: '', exitCode: 0 };
+        }
+        const removed = await this.runEngineCommand(
+          ['container', 'rm', '-f', ...beforeIds],
+          { timeoutMs: ACTION_TIMEOUT_MS, engineOverride: 'podman' }
+        );
+        if (!removed.success) {
+          return removed;
+        }
+        ensureContextUnchanged();
+        const remaining = (await this.composePs(composeFile, undefined, projectName))
+          .filter((container) => container.service === service);
+        ensureContextUnchanged();
+        if (remaining.length !== 0) {
+          throw new Error('Could not verify the requested Compose replica count. Refresh the project.');
+        }
+        return removed;
+      }
+    }
+    const result = await this.runComposeCommand(
       composeFile,
       ['up', '-d', '--scale', `${service}=${replicas}`, service],
       ACTION_TIMEOUT_MS,
       projectName
     );
+    if (!result.success || engine !== 'podman') {
+      return result;
+    }
+    ensureContextUnchanged();
+
+    const current = (await this.composePs(composeFile, undefined, projectName))
+      .filter((container) => container.service === service);
+    ensureContextUnchanged();
+    if (current.length < replicas) {
+      throw new Error(`Compose created ${current.length} of ${replicas} requested replicas.`);
+    }
+    if (current.length === replicas) {
+      return result;
+    }
+
+    const replicaNumbers = current.map((container) => container.replica);
+    if (
+      current.some((container) =>
+        !/^[a-f0-9]{64}$/i.test(container.fullId) ||
+        !beforeIds.has(container.fullId.toLowerCase()) ||
+        container.replica === undefined ||
+        !Number.isSafeInteger(container.replica) ||
+        container.replica < 1
+      ) ||
+      new Set(replicaNumbers).size !== replicaNumbers.length
+    ) {
+      throw new Error('Cannot safely identify excess Compose replicas. Automatic cleanup was not attempted.');
+    }
+    const excess = [...current]
+      .sort((a, b) => b.replica! - a.replica!)
+      .slice(0, current.length - replicas);
+    const removed = await this.runEngineCommand(
+      ['container', 'rm', '-f', ...excess.map((container) => container.fullId)],
+      { timeoutMs: ACTION_TIMEOUT_MS, engineOverride: 'podman' }
+    );
+    if (!removed.success) {
+      return removed;
+    }
+    ensureContextUnchanged();
+    const remaining = (await this.composePs(composeFile, undefined, projectName))
+      .filter((container) => container.service === service);
+    ensureContextUnchanged();
+    if (remaining.length !== replicas) {
+      throw new Error('Could not verify the requested Compose replica count. Refresh the project.');
+    }
+    return {
+      ...result,
+      stdout: [result.stdout, removed.stdout].filter(Boolean).join('\n'),
+    };
   }
 
-  public streamComposeLogs(
+  private spawnComposeLogProcess(
+    inv: { bin: string; args: string[]; cwd: string },
+    engine: ContainerEngine
+  ): Promise<ChildProcess> {
+    return new Promise((resolve, reject) => {
+      const invocation = this.getProcessInvocation(inv.bin, inv.args, engine);
+      const useShell =
+        engine !== 'podman' && process.platform === 'win32' && /\.(cmd|bat|ps1)$/i.test(inv.bin);
+      const child = spawn(invocation.bin, invocation.args, {
+        cwd: inv.cwd,
+        windowsHide: true,
+        shell: useShell,
+        env: {
+          ...process.env,
+          ...(engine === 'podman' ? { PYTHONUNBUFFERED: '1' } : {}),
+          ...invocation.env,
+        },
+      });
+      child.once('spawn', () => resolve(child));
+      child.once('error', reject);
+    });
+  }
+
+  public async streamComposeLogs(
     composeFile: string,
     service: string,
     tail = 150,
     projectName?: string
-  ): ChildProcess {
+  ): Promise<ComposeLogStream[]> {
+    const cfg = getConfig();
+    if (cfg.engine === 'podman') {
+      const targets = await this.getPodmanComposeTargets(composeFile, [service], projectName);
+      if (targets.containers.length > 1 ||
+          targets.containers.some((container) => (container.replica || 0) > 1)) {
+        const { bin, baseArgs } = this.getEngineExecutable('podman');
+        const results = await Promise.allSettled(targets.containers.map((container) =>
+          this.spawnComposeLogProcess({
+            bin,
+            args: [...baseArgs, 'logs', '-f', '--tail', String(tail), container.fullId],
+            cwd: path.dirname(composeFile),
+          }, 'podman')
+        ));
+        const started: ChildProcess[] = [];
+        for (const result of results) {
+          if (result.status === 'fulfilled') started.push(result.value);
+        }
+        const failure = results.find((result) => result.status === 'rejected');
+        if (failure?.status === 'rejected') {
+          started.forEach((child) => child.kill('SIGTERM'));
+          throw failure.reason;
+        }
+        return started.map((process, index) => ({
+          process, containerName: targets.containers[index].name,
+        }));
+      }
+    }
+    const args = ['logs', '-f', '--tail', String(tail), service];
     const inv = this.buildComposeInvocation(
       composeFile,
-      ['logs', '-f', '--tail', String(tail), service],
+      args,
       projectName
     );
-    const useShell = process.platform === 'win32' && /\.(cmd|bat|ps1)$/i.test(inv.bin);
-    return spawn(inv.bin, inv.args, {
-      cwd: inv.cwd,
-      windowsHide: true,
-      shell: useShell,
-    });
+    try {
+      return [{ process: await this.spawnComposeLogProcess(inv, cfg.engine) }];
+    } catch (error) {
+      if (
+        cfg.engine === 'podman' &&
+        cfg.composeCommandStyle === 'auto' &&
+        !cfg.composePath.trim() &&
+        error instanceof Error &&
+        'code' in error &&
+        error.code === 'ENOENT'
+      ) {
+        return [{
+          process: await this.spawnComposeLogProcess(
+            this.buildComposeInvocation(composeFile, args, projectName, 'plugin'),
+            cfg.engine
+          ),
+        }];
+      }
+      throw error;
+    }
+  }
+
+  private async podmanComposeProjectStatus(
+    composeFile: string,
+    projectName?: string
+  ): Promise<CommandResult> {
+    const cfg = getConfig();
+    const isPodmanCompose = (result: CommandResult) =>
+      result.success &&
+      /^\s*podman-compose\s+version\s+\S+/im.test(`${result.stdout}\n${result.stderr}`);
+    let version: CommandResult | undefined;
+    if ((cfg.composeCommandStyle === 'auto' || cfg.composeCommandStyle === 'standalone') &&
+        !cfg.composePath.trim()) {
+      const [detected, status] = await Promise.all([
+        this.runComposeCommand(composeFile, ['version'], QUERY_TIMEOUT_MS, projectName),
+        this.runComposeCommand(composeFile, ['ps', '-q'], QUERY_TIMEOUT_MS, projectName),
+      ]);
+      version = detected;
+      if (isPodmanCompose(detected)) {
+        this.requireQuerySuccess(status, 'Podman Compose project status', 'podman');
+        return status;
+      }
+    }
+
+    const all = await this.runComposeCommand(
+      composeFile, ['ps', '--all', '-q'], QUERY_TIMEOUT_MS, projectName
+    );
+    if (all.success) {
+      return all;
+    }
+
+    const details = `${all.stderr}\n${all.stdout}`;
+    if (all.errorCode || !/unrecognized arguments?:[^\r\n]*--all/i.test(details)) {
+      this.requireQuerySuccess(all, 'Podman Compose project status', 'podman');
+    }
+
+    version ??= await this.runComposeCommand(composeFile, ['version'], QUERY_TIMEOUT_MS, projectName);
+    this.requireQuerySuccess(version, 'Podman Compose provider version', 'podman');
+    if (!isPodmanCompose(version)) {
+      throw new Error(
+        'The configured Compose provider cannot safely list stopped containers: ' +
+        (all.stderr || all.stdout || `exit code ${all.exitCode}`).trim()
+      );
+    }
+
+    // podman-compose's ps includes stopped containers by default and rejects --all.
+    const status = await this.runComposeCommand(
+      composeFile, ['ps', '-q'], QUERY_TIMEOUT_MS, projectName
+    );
+    this.requireQuerySuccess(status, 'Podman Compose project status', 'podman');
+    return status;
   }
 
   public async composePs(
     composeFile: string,
-    composeDoc?: ComposeDocument
+    composeDoc?: ComposeDocument,
+    projectName?: string
   ): Promise<ComposeContainerStatus[]> {
-    const all = await this.listAllContainers();
+    const podmanMode = this.isPodman();
+    const [all, projectStatus] = await Promise.all([
+      this.listAllContainers(),
+      podmanMode
+        ? this.podmanComposeProjectStatus(composeFile, projectName)
+        : Promise.resolve(undefined),
+    ]);
+    let projectIds: string[] | undefined;
+    if (projectStatus) {
+      this.requireQuerySuccess(projectStatus, 'Podman Compose project status', 'podman');
+      projectIds = [];
+      for (const line of projectStatus.stdout.split(/\r?\n/)) {
+        const id = line.trim().replace(/^sha256:/i, '');
+        if (!id || id.startsWith('>>>>')) {
+          continue;
+        }
+        if (!/^[a-f0-9]{12,64}$/i.test(id)) {
+          throw new Error('Podman Compose returned an invalid container ID.');
+        }
+        projectIds.push(id.toLowerCase());
+      }
+    }
     if (all.length === 0) {
       return [];
     }
 
     const normTargetFile = normalizeFsPath(composeFile);
-    const normTargetDir = normalizeFsPath(path.dirname(composeFile));
     const expectedProjNames = new Set<string>();
 
     if (composeDoc?.name) {
@@ -1469,15 +2356,26 @@ export class PodmanService {
       let isMatch = false;
       let resolvedService = c.composeService;
 
-      if (c.composeFile && normalizeFsPath(c.composeFile) === normTargetFile) {
-        isMatch = true;
-      } else if (c.composeFile && normalizeFsPath(path.dirname(c.composeFile)) === normTargetDir) {
-        isMatch = true;
-      } else if (c.composeProject && expectedProjNames.has(c.composeProject.toLowerCase())) {
-        isMatch = true;
-      } else if (containerNameToService.has(c.name)) {
-        isMatch = true;
-        resolvedService = containerNameToService.get(c.name) || resolvedService;
+      const knownFiles = c.composeFiles?.length ? c.composeFiles : c.composeFile ? [c.composeFile] : [];
+      if (projectIds) {
+        const fullId = c.fullId.toLowerCase();
+        isMatch =
+          projectIds.some((id) => fullId.startsWith(id) || id.startsWith(fullId)) &&
+          (knownFiles.length === 0 ||
+            knownFiles.some((file) => normalizeFsPath(file) === normTargetFile));
+      } else {
+        if (knownFiles.some((file) => normalizeFsPath(file) === normTargetFile)) {
+          isMatch = true;
+        } else if (
+          knownFiles.length === 0 &&
+          c.composeProject &&
+          expectedProjNames.has(c.composeProject.toLowerCase())
+        ) {
+          isMatch = true;
+        } else if (knownFiles.length === 0 && !c.composeProject && containerNameToService.has(c.name)) {
+          isMatch = true;
+          resolvedService = containerNameToService.get(c.name) || resolvedService;
+        }
       }
 
       if (!isMatch) {
@@ -1493,6 +2391,7 @@ export class PodmanService {
         fullId: c.fullId,
         name: c.name,
         service: resolvedService || c.name,
+        replica: c.composeReplica,
         status: c.state,
         ports: c.portMappings,
         image: c.image,

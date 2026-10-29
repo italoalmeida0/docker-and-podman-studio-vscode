@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ExternalLink,
   FileText,
+  Pause,
   Play,
   Plus,
   RefreshCw,
@@ -14,6 +15,11 @@ import {
   Trash2,
 } from 'lucide-react';
 import { LogViewer } from '../components/LogViewer';
+import {
+  isRunningState,
+  PodmanBatchActions,
+  usePodmanSelection,
+} from '../components/PodmanBatchActions';
 import {
   ActionPillButton,
   DetailRow,
@@ -77,10 +83,10 @@ export const ContainersPage: React.FC = () => {
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return visibleBase.filter((c) => {
-      if (filterTab === 'running' && c.state !== 'running') {
+      if (filterTab === 'running' && !isRunningState(c.state)) {
         return false;
       }
-      if (filterTab === 'stopped' && c.state === 'running') {
+      if (filterTab === 'stopped' && (isRunningState(c.state) || c.state === 'paused')) {
         return false;
       }
       if (filterTab === 'pod' && !c.podId) {
@@ -102,7 +108,19 @@ export const ContainersPage: React.FC = () => {
     });
   }, [visibleBase, search, filterTab]);
 
-  const runningCount = visibleBase.filter((c) => c.state === 'running').length;
+  const selectable = useMemo(
+    () => allContainers.filter((c) => !c.isInfra && Boolean(c.fullId)),
+    [allContainers]
+  );
+  const visibleSelectable = useMemo(
+    () => filtered.filter((c) => !c.isInfra && Boolean(c.fullId)),
+    [filtered]
+  );
+  const selection = usePodmanSelection(selectable, visibleSelectable, isPodman);
+  const runningCount = visibleBase.filter((c) => isRunningState(c.state)).length;
+  const stoppedCount = visibleBase.filter(
+    (c) => c.state === 'stopped' || c.state === 'exited'
+  ).length;
   const podBoundCount = visibleBase.filter((c) => Boolean(c.podId)).length;
   const composeBoundCount = visibleBase.filter((c) => c.isCompose).length;
 
@@ -125,7 +143,7 @@ export const ContainersPage: React.FC = () => {
       image: cImage.trim(),
       name: cName.trim() || undefined,
       pod: createMode === 'advanced' && cPod ? cPod : undefined,
-      ports: splitList(cPorts),
+      ports: isPodman && createMode === 'advanced' && cPod ? [] : splitList(cPorts),
       volumes: createMode === 'advanced' ? splitLines(cVolumeSpec) : [],
       network: createMode === 'advanced' && cNetwork && !cPod ? cNetwork : undefined,
       env: createMode === 'advanced' ? splitLines(cEnv) : [],
@@ -177,7 +195,7 @@ export const ContainersPage: React.FC = () => {
           />
           <StatCard
             label={t.containers.statStopped}
-            value={visibleBase.length - runningCount}
+            value={stoppedCount}
             detail={t.containers.statStoppedDetail}
           />
           {isPodman ? (
@@ -247,6 +265,14 @@ export const ContainersPage: React.FC = () => {
           </div>
         </div>
 
+        {isPodman && (
+          <PodmanBatchActions
+            selection={selection}
+            busy={busy}
+            onAction={(action, ids) => postMessage('container:batch', { action, ids })}
+          />
+        )}
+
         {/* List */}
         {filtered.length === 0 ? (
           <EmptyState
@@ -266,13 +292,25 @@ export const ContainersPage: React.FC = () => {
           <div className="space-y-2.5">
             {filtered.map((c) => {
               const isOpen = Boolean(expanded[c.id]);
-              const isRunning = c.state === 'running';
+              const isRunning = isRunningState(c.state);
+              const isPaused = c.state === 'paused';
+              const isProtectedInfra = isPodman && c.isInfra;
+              const targetId = isPodman ? c.fullId || c.id : c.id;
               return (
                 <div
                   key={c.fullId || c.id}
                   className="bg-panel-card border border-panel-border rounded-md overflow-hidden shadow-card"
                 >
                   <div className="px-4 py-3 flex items-center justify-between gap-4 flex-wrap">
+                    {isPodman && !c.isInfra && c.fullId && (
+                      <input
+                        type="checkbox"
+                        aria-label={fmt(t.common.selectResource, { name: c.name })}
+                        checked={selection.selectedIds.has(c.fullId)}
+                        disabled={busy}
+                        onChange={() => selection.toggle(c.fullId)}
+                      />
+                    )}
                     <div
                       className="flex items-center gap-3 min-w-0 flex-1 cursor-pointer"
                       onClick={() => setExpanded((prev) => ({ ...prev, [c.id]: !prev[c.id] }))}
@@ -305,43 +343,55 @@ export const ContainersPage: React.FC = () => {
                       <SmallActionButton
                         label={t.common.start}
                         accent
-                        disabled={busy || isRunning}
+                        disabled={busy || isProtectedInfra || isRunning || isPaused}
                         icon={<Play className="w-3 h-3" />}
-                        onClick={() => postMessage('container:start', { containerId: c.id })}
+                        onClick={() => postMessage('container:start', { containerId: targetId })}
                       />
                       <SmallActionButton
                         label={t.common.stop}
-                        disabled={busy || !isRunning}
+                        disabled={busy || isProtectedInfra || !isRunning || c.state === 'stopping'}
                         icon={<Square className="w-3 h-3" />}
-                        onClick={() => postMessage('container:stop', { containerId: c.id })}
+                        onClick={() => postMessage('container:stop', { containerId: targetId })}
                       />
                       <SmallActionButton
                         label={t.common.restart}
-                        disabled={busy}
+                        disabled={busy || isProtectedInfra || isPaused || c.state === 'stopping'}
                         icon={<RotateCcw className="w-3 h-3" />}
-                        onClick={() => postMessage('container:restart', { containerId: c.id })}
+                        onClick={() => postMessage('container:restart', { containerId: targetId })}
                       />
                       <SmallActionButton
                         label={t.common.terminal}
-                        disabled={!isRunning}
+                        disabled={isProtectedInfra || !['running', 'unhealthy', 'starting'].includes(c.state)}
                         icon={<Terminal className="w-3 h-3" />}
                         onClick={() =>
-                          postMessage('container:terminal', { containerId: c.id, name: c.name })
+                          postMessage('container:terminal', { containerId: targetId, name: c.name })
                         }
                       />
+                      {isPodman && !c.isInfra && (
+                        <SmallActionButton
+                          label={isPaused ? t.common.resume : t.common.pause}
+                          disabled={busy || (!isPaused && !isRunning)}
+                          icon={isPaused ? <Play className="w-3 h-3" /> : <Pause className="w-3 h-3" />}
+                          onClick={() =>
+                            postMessage(isPaused ? 'container:unpause' : 'container:pause', {
+                              containerId: c.fullId,
+                            })
+                          }
+                        />
+                      )}
                       <SmallActionButton
                         label={t.common.logs}
                         icon={<FileText className="w-3 h-3" />}
                         onClick={() => {
                           clearLogs();
                           setLogContainer(c);
-                          postMessage('container:logs', { containerId: c.id, name: c.name });
+                          postMessage('container:logs', { containerId: targetId, name: c.name });
                         }}
                       />
                       <SmallActionButton
                         label={t.common.delete}
                         danger
-                        disabled={busy}
+                        disabled={busy || isProtectedInfra}
                         icon={<Trash2 className="w-3 h-3" />}
                         onClick={() => setDeleteTarget(c)}
                       />
@@ -480,6 +530,7 @@ export const ContainersPage: React.FC = () => {
               type="text"
               value={cPorts}
               onChange={(e) => setCPorts(e.target.value)}
+              disabled={isPodman && createMode === 'advanced' && Boolean(cPod)}
               placeholder="8080:80, 8443:443"
               className="input-field font-mono"
             />
@@ -639,7 +690,7 @@ export const ContainersPage: React.FC = () => {
                 icon={<ExternalLink className="w-3 h-3" />}
                 onClick={() =>
                   postMessage('container:logs:external', {
-                    containerId: logContainer.id,
+                    containerId: isPodman ? logContainer.fullId || logContainer.id : logContainer.id,
                     name: logContainer.name,
                     mode: 'outputChannel',
                   })
@@ -650,7 +701,7 @@ export const ContainersPage: React.FC = () => {
                 icon={<Terminal className="w-3 h-3" />}
                 onClick={() =>
                   postMessage('container:logs:external', {
-                    containerId: logContainer.id,
+                    containerId: isPodman ? logContainer.fullId || logContainer.id : logContainer.id,
                     name: logContainer.name,
                     mode: 'terminal',
                   })
@@ -660,7 +711,7 @@ export const ContainersPage: React.FC = () => {
                 label={t.common.refresh}
                 onClick={() =>
                   postMessage('container:logs', {
-                    containerId: logContainer.id,
+                    containerId: isPodman ? logContainer.fullId || logContainer.id : logContainer.id,
                     name: logContainer.name,
                   })
                 }
@@ -699,7 +750,9 @@ export const ContainersPage: React.FC = () => {
                 label={t.containers.deleteModalTitle}
                 variant="danger"
                 onClick={() => {
-                  postMessage('container:remove', { containerId: deleteTarget.id });
+                  postMessage('container:remove', {
+                    containerId: isPodman ? deleteTarget.fullId || deleteTarget.id : deleteTarget.id,
+                  });
                   setDeleteTarget(null);
                 }}
               />

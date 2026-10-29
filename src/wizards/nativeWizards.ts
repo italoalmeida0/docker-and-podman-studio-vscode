@@ -212,6 +212,18 @@ export class NativeCommandsManager implements vscode.Disposable {
       return;
     }
 
+    if (action === 'down' && getConfig().engine === 'podman' && getConfig().confirmDeletions) {
+      const yes = bt('yes');
+      const answer = await vscode.window.showWarningMessage(
+        bt('confirmComposeDown'),
+        { modal: true, detail: file },
+        yes
+      );
+      if (answer !== yes) {
+        return;
+      }
+    }
+
     const engineLabel = getEngineLabel();
     await withStatus(`${engineLabel} Compose ${action} (${path.basename(file)})`, async () => {
       const res =
@@ -233,7 +245,7 @@ export class NativeCommandsManager implements vscode.Disposable {
           res.commandStr
         );
       } else {
-        if (action === 'down') {
+        if (action === 'down' && getConfig().engine === 'docker') {
           this.statusProvider.stopPolling();
         } else {
           this.statusProvider.startPolling(file, getConfig().pollingInterval);
@@ -243,6 +255,7 @@ export class NativeCommandsManager implements vscode.Disposable {
         );
         await this.onStateMutated(file);
       }
+      return res;
     });
   }
 
@@ -262,6 +275,9 @@ export class NativeCommandsManager implements vscode.Disposable {
         vscode.window.showInformationMessage(`Podman Machine '${machine}' is running.`);
       }
       await this.onStateMutated();
+      return !res.success && res.stderr.toLowerCase().includes('already running')
+        ? { ...res, success: true }
+        : res;
     });
   }
 
@@ -281,6 +297,7 @@ export class NativeCommandsManager implements vscode.Disposable {
         vscode.window.showInformationMessage(`Podman Machine '${machine}' stopped.`);
       }
       await this.onStateMutated();
+      return res;
     });
   }
 
@@ -300,6 +317,7 @@ export class NativeCommandsManager implements vscode.Disposable {
         vscode.window.showInformationMessage(`Podman Machine '${machine}' restarted.`);
       }
       await this.onStateMutated();
+      return res;
     });
   }
 
@@ -347,6 +365,7 @@ export class NativeCommandsManager implements vscode.Disposable {
         );
         await this.onStateMutated();
       }
+      return res;
     });
   }
 
@@ -536,6 +555,7 @@ export class NativeCommandsManager implements vscode.Disposable {
         );
         await this.onStateMutated();
       }
+      return res;
     });
   }
 
@@ -555,6 +575,7 @@ export class NativeCommandsManager implements vscode.Disposable {
         vscode.window.showInformationMessage(`Volume '${name}' created.`);
         await this.onStateMutated();
       }
+      return res;
     });
   }
 
@@ -574,6 +595,7 @@ export class NativeCommandsManager implements vscode.Disposable {
         vscode.window.showInformationMessage(`Network '${name}' created.`);
         await this.onStateMutated();
       }
+      return res;
     });
   }
 
@@ -617,6 +639,7 @@ export class NativeCommandsManager implements vscode.Disposable {
         vscode.window.showInformationMessage(`Image '${tag}' built successfully!`);
         await this.onStateMutated();
       }
+      return res;
     });
   }
 
@@ -659,6 +682,7 @@ export class NativeCommandsManager implements vscode.Disposable {
       } else {
         vscode.window.showInformationMessage(`Image pushed to '${target}'!`);
       }
+      return res;
     });
   }
 
@@ -670,7 +694,12 @@ export class NativeCommandsManager implements vscode.Disposable {
       const yesLabel = bt('yes');
       const ans = await vscode.window.showWarningMessage(
         `Are you sure you want to execute "${label}"?`,
-        { modal: true },
+        {
+          modal: true,
+          detail: kind === 'pruneBuilder' && getConfig().engine === 'podman'
+            ? bt('podmanBuildCacheWarning')
+            : undefined,
+        },
         yesLabel
       );
       if (ans !== yesLabel) {
@@ -691,6 +720,7 @@ export class NativeCommandsManager implements vscode.Disposable {
         vscode.window.showInformationMessage(bt('opCompleted', { op: label }));
         await this.onStateMutated();
       }
+      return res;
     });
   }
 
@@ -770,7 +800,9 @@ export class NativeCommandsManager implements vscode.Disposable {
       },
       {
         label: '$(flame) Clear Builder Cache',
-        description: `${cmd} builder prune -a -f`,
+        description: engine === 'podman'
+          ? `${cmd} image prune --build-cache -f (also removes dangling images)`
+          : `${cmd} builder prune -a -f`,
         command: 'dockerPodmanStudio.pruneBuilderCache',
       },
       {

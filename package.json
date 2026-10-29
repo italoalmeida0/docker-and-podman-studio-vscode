@@ -427,6 +427,7 @@
     "build:ui": "npm --prefix webview-ui run build",
     "build": "node esbuild.js --production",
     "build:all": "npm run build:ui && npm run build",
+    "test": "node --test",
     "watch": "node esbuild.js --watch",
     "package": "npx @vscode/vsce package --no-dependencies"
   },

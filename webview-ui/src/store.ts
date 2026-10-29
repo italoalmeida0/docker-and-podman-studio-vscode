@@ -80,6 +80,7 @@ export type ServiceStatus =
   | 'stopping'
   | 'restarting'
   | 'unhealthy'
+  | 'paused'
   | 'exited'
   | 'stopped';
 
@@ -95,6 +96,7 @@ export interface ComposeContainerStatus {
   fullId: string;
   name: string;
   service: string;
+  replica?: number;
   status: ServiceStatus;
   ports: PortMapping[];
   image: string;
@@ -141,7 +143,9 @@ export interface PodmanContainer {
   isCompose: boolean;
   composeProject: string;
   composeService: string;
+  composeReplica?: number;
   composeFile: string;
+  composeFiles: string[];
   networks: string[];
   mounts: string[];
   command: string;
@@ -332,6 +336,7 @@ interface StudioState {
   selectedDirectory: string | null;
   imageResults: ImageSearchResult[];
   operationInProgress: string | null;
+  operationsInProgress: Record<string, number>;
 
   // Engine resources
   systemInfo: PodmanSystemInfo | null;
@@ -367,8 +372,9 @@ interface StudioState {
   setComposeContainers: (containers: ComposeContainerStatus[]) => void;
   setSelectedDirectory: (dir: string | null) => void;
   setImageResults: (results: ImageSearchResult[]) => void;
-  setOperation: (op: string | null) => void;
-  setSystemInfo: (info: PodmanSystemInfo) => void;
+  beginOperation: (op: string) => void;
+  endOperation: (op: string) => void;
+  setSystemInfo: (info: PodmanSystemInfo | null) => void;
   setDiskUsage: (items: PodmanDiskUsageItem[]) => void;
   setDockerContexts: (contexts: DockerContextItem[]) => void;
   setMachines: (machines: PodmanMachine[]) => void;
@@ -426,6 +432,7 @@ export const useStudioStore = create<StudioState>((set) => ({
   selectedDirectory: null,
   imageResults: [],
   operationInProgress: null,
+  operationsInProgress: {},
 
   systemInfo: null,
   diskUsage: [],
@@ -451,11 +458,31 @@ export const useStudioStore = create<StudioState>((set) => ({
   setComposeContainers: (composeContainers) => set({ composeContainers }),
   setSelectedDirectory: (selectedDirectory) => set({ selectedDirectory }),
   setImageResults: (imageResults) => set({ imageResults }),
-  setOperation: (operationInProgress) => set({ operationInProgress }),
+  beginOperation: (op) =>
+    set((state) => ({
+      operationsInProgress: {
+        ...state.operationsInProgress,
+        [op]: (state.operationsInProgress[op] || 0) + 1,
+      },
+      operationInProgress: state.operationInProgress || op,
+    })),
+  endOperation: (op) =>
+    set((state) => {
+      const operationsInProgress = { ...state.operationsInProgress };
+      if ((operationsInProgress[op] || 0) > 1) {
+        operationsInProgress[op]--;
+      } else {
+        delete operationsInProgress[op];
+      }
+      return {
+        operationsInProgress,
+        operationInProgress: Object.keys(operationsInProgress)[0] || null,
+      };
+    }),
   setSystemInfo: (systemInfo) =>
     set((state) => ({
       systemInfo,
-      engine: systemInfo.engine || state.engine,
+      engine: systemInfo?.engine || state.engine,
     })),
   setDiskUsage: (diskUsage) => set({ diskUsage }),
   setDockerContexts: (dockerContexts) => set({ dockerContexts }),
@@ -524,10 +551,10 @@ export function useStudioMessageBridge(): void {
           store.setImageResults(Array.isArray(p?.results) ? p.results : []);
           break;
         case 'operation:start':
-          store.setOperation(String(p || 'busy'));
+          store.beginOperation(String(p || 'busy'));
           break;
         case 'operation:end':
-          store.setOperation(null);
+          store.endOperation(String(p || 'busy'));
           break;
         case 'notification':
           if (p?.message) {
@@ -540,9 +567,7 @@ export function useStudioMessageBridge(): void {
           }
           break;
         case 'system:info:update':
-          if (p) {
-            store.setSystemInfo(p);
-          }
+          store.setSystemInfo(p ?? null);
           break;
         case 'system:df:update':
           store.setDiskUsage(Array.isArray(p) ? p : []);

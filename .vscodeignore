@@ -2,6 +2,7 @@
 .git/**
 .github/**
 src/**
+tests/**
 webview-ui/src/**
 webview-ui/node_modules/**
 webview-ui/index.html

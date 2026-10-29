@@ -59,6 +59,15 @@ export function getStatusTheme(status: ServiceStatus | string, t?: TranslationDi
         badgeBg: 'bg-amber-500/10',
         pulse: true,
       };
+    case 'paused':
+      return {
+        dot: 'bg-amber-400',
+        label: t ? t.status.paused : 'Paused',
+        text: 'text-amber-300',
+        border: 'border-amber-500/20',
+        badgeBg: 'bg-amber-500/10',
+        pulse: false,
+      };
     case 'exited':
       return {
         dot: 'bg-rose-400',

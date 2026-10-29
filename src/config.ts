@@ -91,6 +91,13 @@ export function getConfig(): StudioConfig {
   };
 }
 
+export function getPodmanComposeSettingsKey(): string {
+  const cfg = getConfig();
+  return JSON.stringify([
+    cfg.engine, cfg.podmanPath, cfg.composePath, cfg.composeCommandStyle, cfg.inPod,
+  ]);
+}
+
 export function onConfigChange(
   listener: (e: vscode.ConfigurationChangeEvent) => void
 ): vscode.Disposable {

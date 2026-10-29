@@ -6,6 +6,7 @@ export type ServiceStatus =
   | 'stopping'
   | 'restarting'
   | 'unhealthy'
+  | 'paused'
   | 'exited'
   | 'stopped';
 
@@ -21,6 +22,7 @@ export interface ComposeContainerStatus {
   fullId: string;
   name: string;
   service: string;
+  replica?: number;
   status: ServiceStatus;
   ports: PortMapping[];
   image: string;
@@ -67,7 +69,9 @@ export interface PodmanContainer {
   isCompose: boolean;
   composeProject: string;
   composeService: string;
+  composeReplica?: number;
   composeFile: string;
+  composeFiles: string[];
   networks: string[];
   mounts: string[];
   command: string;
@@ -194,6 +198,16 @@ export interface CommandResult {
   stderr: string;
   exitCode: number;
   commandStr?: string;
+  errorCode?: string;
+}
+
+export type PodmanBatchAction = 'start' | 'stop' | 'restart';
+export type PodmanBatchResource = 'container' | 'pod';
+
+export interface PodmanBatchItemResult {
+  id: string;
+  name: string;
+  result: CommandResult;
 }
 
 export interface CreatePodOptions {
@@ -241,6 +255,9 @@ export const InboundCommand = {
   POD_START: 'pod:start',
   POD_STOP: 'pod:stop',
   POD_RESTART: 'pod:restart',
+  POD_PAUSE: 'pod:pause',
+  POD_UNPAUSE: 'pod:unpause',
+  POD_BATCH: 'pod:batch',
   POD_REMOVE: 'pod:remove',
   POD_LOGS: 'pod:logs',
 
@@ -250,6 +267,9 @@ export const InboundCommand = {
   CONTAINER_START: 'container:start',
   CONTAINER_STOP: 'container:stop',
   CONTAINER_RESTART: 'container:restart',
+  CONTAINER_PAUSE: 'container:pause',
+  CONTAINER_UNPAUSE: 'container:unpause',
+  CONTAINER_BATCH: 'container:batch',
   CONTAINER_REMOVE: 'container:remove',
   CONTAINER_TERMINAL: 'container:terminal',
   CONTAINER_LOGS: 'container:logs',

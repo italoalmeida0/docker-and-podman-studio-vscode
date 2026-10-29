@@ -84,13 +84,18 @@ Switch between **Docker** and **Podman** or choose from **16 built-in languages*
 - **Visual `New Compose` Wizard**: Scaffold `docker-compose.yml` or `podman-compose.yml` stacks with live YAML preview, `Dockerfile` / `Containerfile` build configuration, healthchecks, and integrated image search across **Docker Hub**, **Quay.io**, and private OCI registries.
 - **Smart Auto-Discovery**: Automatically detects `docker-compose.yml`, `compose.yml`, `podman-compose.yml`, and `container-compose.yml` files in your workspace **and** discovers external Compose projects from active container labels.
 - **YAML IntelliSense & Diagnostics**: Real-time autocompletion and schema diagnostics for Compose files directly inside the VS Code editor.
+- **Podman Service Scaling**: In the **Services** tab, choose **Scale** and explicitly enter a service's desired replica count, including zero. Scaling above zero runs Compose up and can start dependencies or recreate containers. Scaling down removes excess containers and their writable layers, retains volumes, and asks for confirmation unless deletion confirmations are disabled.
+- **Replica-Aware Podman Actions**: Start, stop, restart, and logs include runtime-scaled replicas even when `podman-compose` only expands the counts declared in YAML. Down verifies container removal and safely cleans up leftover replicas, retaining volumes unless explicitly requested and preserving orphan services unless `removeOrphans` is enabled.
 
 ### Container, Pod & Infrastructure Management
 - **Simple & Advanced Containers**: Launch standalone or Pod-attached containers with port mappings, volume mounts, environment variables, CPU/Memory limits, and custom `--mount` specs. Open an **Interactive Terminal** (`exec -it`) in one click.
 - **Kubernetes-Style Pods *(Podman Mode)***: Create Pods with custom `--hostname`, published ports, `--network`, `--add-host`, `--cpu-shares`, and labels; inspect member & infra containers; stream Pod logs; and manage Pod lifecycles.
+- **Podman Batch Controls**: Select visible containers or pods to start, stop, or restart eligible resources together. Failures are reported per resource. Individual containers and pods can also be paused and resumed; Podman infra containers are protected from individual lifecycle and delete actions.
 - **OCI Images, Builds & Prune Suite**: Pull images, build from `Dockerfile` or `Containerfile`, push to remote registries, and reclaim disk space (`Prune Dangling`, `Prune All Unused`, `Clear Builder Cache`).
 - **Volumes & Networks**: Create, inspect (drivers, subnets, gateways, DNS, IPv6), prune, and delete volumes and networks.
 - **Encrypted Registry Authentication**: Store private registry credentials securely in **VS Code `SecretStorage`** (never written in plaintext to `settings.json`) with optional automatic `docker login` / `podman login`.
+
+In Podman mode, image, volume, and network removal does not force-remove resources in use. Podman build-cache cleanup uses `podman image prune --build-cache` when supported; it also removes dangling images. Do not run it during a build.
 
 ---
 
@@ -119,8 +124,10 @@ Only the CLI for your selected engine is required:
 - **For Docker Mode *(Default)***:
   - **Docker CLI** (`docker`) and **Docker Compose** (`docker compose` v2 plugin or `docker-compose`) — compatible with Docker Desktop, Docker Engine on Linux, OrbStack, Rancher Desktop, and Colima.
 - **For Podman Mode**:
-  - **Podman CLI** (`podman` v4, v5, or v6+) and **Podman Compose** (`podman-compose` or `podman compose`).
+  - **Podman CLI** and **Podman Compose** (`podman-compose` or `podman compose`). Provider capabilities vary; the isolated lifecycle and scaling tests have been exercised with Podman 6.1.4 and podman-compose 1.6.0 on Windows.
+  - Compose status requires a provider that supports `ps --all -q`, or `podman-compose`, whose `ps -q` includes stopped containers. Studio reports an error instead of silently omitting stopped containers when it cannot establish this.
   - *Windows / macOS*: An initialized Podman Machine (`podman machine init`), manageable directly from the Studio Dashboard.
+  - *Windows*: Configure a native executable or a PowerShell script for Podman and Compose. `.cmd` and `.bat` wrappers are rejected for Podman commands because their shell argument handling cannot safely preserve arbitrary input. PowerShell execution policies still apply.
 
 ---
 
@@ -206,9 +213,14 @@ npm --prefix webview-ui install
 # Build Webview UI + Extension Host bundle
 npm run build:all
 
+# Run regression tests (no Podman resources are changed)
+npm test
+
 # Package into a .vsix installer
 npm run package
 ```
+
+For opt-in tests against an isolated Podman project and resources, see [CONTRIBUTING.md](CONTRIBUTING.md#podman-integration-tests).
 
 ---
 

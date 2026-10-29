@@ -30,8 +30,9 @@ import {
   StatusBadge,
 } from '../components/Shared';
 import { TopologyView } from '../components/TopologyView';
+import { groupComposeContainers, parseDesiredReplicas, summarizeComposeService } from '../composeStatus';
 import { useI18n } from '../i18n';
-import { ComposeContainerStatus, useStudioStore } from '../store';
+import { useStudioStore } from '../store';
 import { useVsCodeMessaging } from '../vscode';
 
 type ComposeTab =
@@ -43,8 +44,6 @@ type ComposeTab =
   | 'yaml'
   | 'logs'
   | 'builder';
-
-const ACTIVE_SET = new Set(['running', 'starting', 'stopping', 'restarting', 'unhealthy']);
 
 function toStringList(value: any): string[] {
   if (!value) {
@@ -82,7 +81,7 @@ function serializeServicePreview(def: Record<string, any>): string {
 }
 
 export const ComposePage: React.FC = () => {
-  const { t, fmt, engineLabel } = useI18n();
+  const { t, fmt, engine, engineLabel } = useI18n();
   const { postMessage } = useVsCodeMessaging();
   const {
     document,
@@ -103,6 +102,12 @@ export const ComposePage: React.FC = () => {
   const [editingService, setEditingService] = useState<string | null>(null);
   const [serviceYamlDraft, setServiceYamlDraft] = useState('');
   const [removeServiceTarget, setRemoveServiceTarget] = useState<string | null>(null);
+  const [scaleTarget, setScaleTarget] = useState<string | null>(null);
+  const [scaleReplicas, setScaleReplicas] = useState('');
+
+  useEffect(() => {
+    setScaleTarget(null);
+  }, [activeFile, engine]);
 
   // Raw YAML draft
   const [yamlDraft, setYamlDraft] = useState('');
@@ -112,6 +117,7 @@ export const ComposePage: React.FC = () => {
 
   // Logs tab state
   const [selectedLogService, setSelectedLogService] = useState<string>('');
+  const [logPaused, setLogPaused] = useState(false);
 
   // Resources tab forms
   const [newNetName, setNewNetName] = useState('');
@@ -135,30 +141,30 @@ export const ComposePage: React.FC = () => {
     [document]
   );
 
-  const containerByService = useMemo(() => {
-    const map = new Map<string, ComposeContainerStatus>();
-    for (const c of composeContainers) {
-      if (c.service) {
-        map.set(c.service, c);
-      }
+  const summaryByService = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof summarizeComposeService>>();
+    for (const [service, containers] of groupComposeContainers(composeContainers)) {
+      map.set(service, summarizeComposeService(containers, engine === 'podman'));
     }
     return map;
-  }, [composeContainers]);
+  }, [composeContainers, engine]);
 
   const activeServicesCount = useMemo(
     () =>
       servicesEntries.filter(([name]) => {
-        const st = containerByService.get(name)?.status;
-        return st && ACTIVE_SET.has(st);
+        return summaryByService.get(name)?.active;
       }).length,
-    [servicesEntries, containerByService]
+    [servicesEntries, summaryByService]
   );
 
-  const stackHasActiveContainers = activeServicesCount > 0;
+  const stackHasActiveContainers = engine === 'podman'
+    ? Array.from(summaryByService.values()).some((summary) => summary.active)
+    : activeServicesCount > 0;
   const activePodName = useMemo(
     () => composeContainers.find((c) => c.podName)?.podName || '',
     [composeContainers]
   );
+  const desiredScaleReplicas = parseDesiredReplicas(scaleReplicas);
 
   const allVariables = useMemo(() => {
     const rows: Array<{ service: string; key: string; value: string }> = [];
@@ -198,22 +204,39 @@ export const ComposePage: React.FC = () => {
   }, [allVariables, varSearch]);
 
   const openLogsForService = (svcName: string) => {
-    if (selectedLogService && selectedLogService !== svcName) {
-      postMessage('logs:stop', { service: selectedLogService });
-    }
-    clearLogs();
     setSelectedLogService(svcName);
+    setLogPaused(false);
     setTab('logs');
-    postMessage('logs:start', { service: svcName });
   };
 
+  const selectedLogServiceExists = Boolean(
+    selectedLogService && document?.services &&
+    Object.prototype.hasOwnProperty.call(document.services, selectedLogService)
+  );
+
   useEffect(() => {
-    if (tab === 'logs' && !selectedLogService && servicesEntries.length > 0) {
-      const first = servicesEntries[0][0];
-      setSelectedLogService(first);
-      postMessage('logs:start', { service: first });
+    clearLogs();
+    setLogPaused(false);
+  }, [activeFile, clearLogs]);
+
+  useEffect(() => {
+    if (tab === 'logs' && !selectedLogServiceExists) {
+      const next = servicesEntries[0]?.[0] || '';
+      if (next !== selectedLogService) {
+        setSelectedLogService(next);
+        setLogPaused(false);
+      }
     }
-  }, [tab, selectedLogService, servicesEntries, postMessage]);
+  }, [tab, selectedLogService, selectedLogServiceExists, servicesEntries]);
+
+  useEffect(() => {
+    if (tab !== 'logs' || !activeFile || !selectedLogServiceExists || logPaused) {
+      return;
+    }
+    clearLogs();
+    postMessage('logs:start', { service: selectedLogService });
+    return () => postMessage('logs:stop', { service: selectedLogService });
+  }, [tab, activeFile, selectedLogService, selectedLogServiceExists, logPaused, clearLogs, postMessage]);
 
   const handleServiceAction = (
     action: 'start' | 'stop' | 'down' | 'restart',
@@ -490,9 +513,10 @@ export const ComposePage: React.FC = () => {
 
                 <div className="grid grid-cols-2 gap-4">
                   {servicesEntries.map(([svcName, svc]) => {
-                    const st = containerByService.get(svcName);
-                    const status = st?.status || 'stopped';
-                    const isRunning = ACTIVE_SET.has(status);
+                    const summary = summaryByService.get(svcName);
+                    const st = summary?.container;
+                    const status = summary?.status || 'stopped';
+                    const isRunning = Boolean(summary?.active);
                     const ports = toStringList(svc?.ports);
                     const nets = toStringList(svc?.networks);
                     const deps = toStringList(svc?.depends_on);
@@ -600,9 +624,11 @@ export const ComposePage: React.FC = () => {
             {tab === 'services' && (
               <div className="space-y-3">
                 {servicesEntries.map(([svcName, svc]) => {
-                  const st = containerByService.get(svcName);
-                  const status = st?.status || 'stopped';
-                  const isActive = ACTIVE_SET.has(status);
+                  const summary = summaryByService.get(svcName);
+                  const st = summary?.container;
+                  const terminalContainer = summary?.terminalContainer;
+                  const status = summary?.status || 'stopped';
+                  const isActive = Boolean(summary?.active);
                   const isOpen = Boolean(expandedServices[svcName]);
                   const isEditing = editingService === svcName;
 
@@ -629,6 +655,11 @@ export const ComposePage: React.FC = () => {
                               </span>
                               {st?.id && (
                                 <span className="text-xs font-mono text-text-muted">{st.id}</span>
+                              )}
+                              {engine === 'podman' && summary && summary.count > 1 && (
+                                <span className="text-xs text-text-secondary">
+                                  {fmt(t.compose.scaleCurrent, { count: summary.count })}
+                                </span>
                               )}
                               {st?.podName && (
                                 <span className="px-2 py-0.5 text-[10px] rounded bg-purple-500/15 text-accent-purple border border-accent-purple font-mono">
@@ -662,15 +693,26 @@ export const ComposePage: React.FC = () => {
                             icon={<RotateCcw className="w-3 h-3" />}
                             onClick={() => handleServiceAction('restart', svcName)}
                           />
-                          {st?.id && (
+                          {engine === 'podman' && (
+                            <SmallActionButton
+                              label={t.compose.scaleService}
+                              disabled={busy}
+                              icon={<Boxes className="w-3 h-3" />}
+                              onClick={() => {
+                                setScaleReplicas('');
+                                setScaleTarget(svcName);
+                              }}
+                            />
+                          )}
+                          {terminalContainer?.id && (
                             <SmallActionButton
                               label={t.common.terminal}
                               disabled={!isActive}
                               icon={<Terminal className="w-3 h-3" />}
                               onClick={() =>
                                 postMessage('container:terminal', {
-                                  containerId: st.id,
-                                  name: st.name || svcName,
+                                  containerId: terminalContainer.id,
+                                  name: terminalContainer.name || svcName,
                                 })
                               }
                             />
@@ -742,6 +784,7 @@ export const ComposePage: React.FC = () => {
                                   <ActionPillButton
                                     label={t.compose.saveServiceBtn}
                                     variant="podman"
+                                    disabled={engine === 'podman' && isActive}
                                     icon={<Save className="w-3.5 h-3.5" />}
                                     onClick={() => {
                                       postMessage('service:update', {
@@ -755,6 +798,7 @@ export const ComposePage: React.FC = () => {
                               </div>
                               <textarea
                                 value={serviceYamlDraft}
+                                readOnly={engine === 'podman' && isActive}
                                 onChange={(e) => setServiceYamlDraft(e.target.value)}
                                 className="input-field font-mono text-xs min-h-[220px]"
                               />
@@ -1057,8 +1101,8 @@ export const ComposePage: React.FC = () => {
                     <SmallActionButton label={t.common.clear} onClick={clearLogs} />
                     {selectedLogService && (
                       <SmallActionButton
-                        label={t.common.pause}
-                        onClick={() => postMessage('logs:stop', { service: selectedLogService })}
+                        label={logPaused ? t.common.resume : t.common.pause}
+                        onClick={() => setLogPaused((paused) => !paused)}
                       />
                     )}
                   </div>
@@ -1192,6 +1236,55 @@ export const ComposePage: React.FC = () => {
 
       {/* Create Compose Wizard Modal */}
       {showCreateModal && <CreateComposeModal onClose={() => setShowCreateModal(false)} />}
+
+      {scaleTarget && engine === 'podman' && activeFile && (
+        <Modal
+          title={fmt(t.compose.scaleTitle, { name: scaleTarget })}
+          maxWidth="max-w-md"
+          onClose={() => setScaleTarget(null)}
+          footer={
+            <>
+              <ActionPillButton label={t.common.cancel} onClick={() => setScaleTarget(null)} />
+              <ActionPillButton
+                label={t.compose.scaleService}
+                variant="podman"
+                disabled={
+                  busy || desiredScaleReplicas === undefined ||
+                  !Object.prototype.hasOwnProperty.call(document?.services || {}, scaleTarget)
+                }
+                onClick={() => {
+                  if (desiredScaleReplicas === undefined) {
+                    return;
+                  }
+                  postMessage('stack:scale', {
+                    service: scaleTarget,
+                    replicas: desiredScaleReplicas,
+                  });
+                  setScaleTarget(null);
+                }}
+              />
+            </>
+          }
+        >
+          <label htmlFor="compose-scale-replicas" className="block text-xs text-text-secondary">
+            {t.compose.scaleReplicas}
+          </label>
+          <input
+            id="compose-scale-replicas"
+            type="number"
+            min="0"
+            step="1"
+            value={scaleReplicas}
+            onChange={(event) => setScaleReplicas(event.target.value)}
+            autoFocus
+            className="input-field font-mono"
+          />
+          <p className="text-xs text-text-secondary">
+            {fmt(t.compose.scaleCurrent, { count: summaryByService.get(scaleTarget)?.count || 0 })}
+          </p>
+          <p className="text-xs text-text-secondary">{t.compose.scaleWarning}</p>
+        </Modal>
+      )}
 
       {/* Remove Service Confirmation Modal */}
       {removeServiceTarget && (

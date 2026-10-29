@@ -3,6 +3,7 @@ import {
   Boxes,
   ChevronDown,
   FileText,
+  Pause,
   Play,
   Plus,
   RefreshCw,
@@ -12,6 +13,11 @@ import {
   Trash2,
 } from 'lucide-react';
 import { LogViewer } from '../components/LogViewer';
+import {
+  isRunningState,
+  PodmanBatchActions,
+  usePodmanSelection,
+} from '../components/PodmanBatchActions';
 import {
   ActionPillButton,
   DetailRow,
@@ -59,10 +65,10 @@ export const PodsPage: React.FC = () => {
   const filteredPods = useMemo(() => {
     const q = search.trim().toLowerCase();
     return pods.filter((pod) => {
-      if (statusFilter === 'running' && pod.state !== 'running') {
+      if (statusFilter === 'running' && !isRunningState(pod.state)) {
         return false;
       }
-      if (statusFilter === 'stopped' && pod.state === 'running') {
+      if (statusFilter === 'stopped' && (isRunningState(pod.state) || pod.state === 'paused')) {
         return false;
       }
       if (!q) {
@@ -77,7 +83,14 @@ export const PodsPage: React.FC = () => {
     });
   }, [pods, search, statusFilter]);
 
-  const runningCount = pods.filter((p) => p.state === 'running').length;
+  const selectable = useMemo(() => pods.filter((pod) => Boolean(pod.fullId)), [pods]);
+  const visibleSelectable = useMemo(
+    () => filteredPods.filter((pod) => Boolean(pod.fullId)),
+    [filteredPods]
+  );
+  const selection = usePodmanSelection(selectable, visibleSelectable, engine === 'podman');
+  const runningCount = pods.filter((p) => isRunningState(p.state)).length;
+  const stoppedCount = pods.filter((p) => p.state === 'stopped' || p.state === 'exited').length;
   const totalPodContainers = pods.reduce((acc, p) => acc + p.containers.length, 0);
 
   const handleCreatePod = () => {
@@ -178,7 +191,7 @@ export const PodsPage: React.FC = () => {
           />
           <StatCard
             label={t.pods.stoppedPods}
-            value={pods.length - runningCount}
+            value={stoppedCount}
             detail={t.pods.readyToStart}
           />
           <StatCard
@@ -224,6 +237,12 @@ export const PodsPage: React.FC = () => {
           </div>
         </div>
 
+        <PodmanBatchActions
+          selection={selection}
+          busy={busy}
+          onAction={(action, ids) => postMessage('pod:batch', { action, ids })}
+        />
+
         {/* Pods List */}
         {filteredPods.length === 0 ? (
           <EmptyState
@@ -243,13 +262,23 @@ export const PodsPage: React.FC = () => {
           <div className="space-y-3">
             {filteredPods.map((pod) => {
               const expanded = Boolean(expandedPods[pod.id]);
-              const isRunning = pod.state === 'running';
+              const isRunning = isRunningState(pod.state);
+              const isPaused = pod.state === 'paused';
               return (
                 <div
                   key={pod.fullId || pod.id}
                   className="bg-panel-card border border-panel-border rounded-md overflow-hidden shadow-card"
                 >
                   <div className="px-4 py-3.5 flex items-center justify-between gap-4 flex-wrap">
+                    {pod.fullId && (
+                      <input
+                        type="checkbox"
+                        aria-label={fmt(t.common.selectResource, { name: pod.name })}
+                        checked={selection.selectedIds.has(pod.fullId)}
+                        disabled={busy}
+                        onChange={() => selection.toggle(pod.fullId)}
+                      />
+                    )}
                     <div
                       className="flex items-center gap-3 min-w-0 flex-1 cursor-pointer"
                       onClick={() =>
@@ -278,21 +307,31 @@ export const PodsPage: React.FC = () => {
                       <SmallActionButton
                         label={t.common.start}
                         accent
-                        disabled={busy || isRunning}
+                        disabled={busy || isRunning || isPaused}
                         icon={<Play className="w-3 h-3" />}
-                        onClick={() => postMessage('pod:start', { podId: pod.id })}
+                        onClick={() => postMessage('pod:start', { podId: pod.fullId || pod.id })}
                       />
                       <SmallActionButton
                         label={t.common.stop}
-                        disabled={busy || !isRunning}
+                        disabled={busy || !isRunning || pod.state === 'stopping'}
                         icon={<Square className="w-3 h-3" />}
-                        onClick={() => postMessage('pod:stop', { podId: pod.id })}
+                        onClick={() => postMessage('pod:stop', { podId: pod.fullId || pod.id })}
                       />
                       <SmallActionButton
                         label={t.common.restart}
-                        disabled={busy}
+                        disabled={busy || isPaused || pod.state === 'stopping'}
                         icon={<RotateCcw className="w-3 h-3" />}
-                        onClick={() => postMessage('pod:restart', { podId: pod.id })}
+                        onClick={() => postMessage('pod:restart', { podId: pod.fullId || pod.id })}
+                      />
+                      <SmallActionButton
+                        label={isPaused ? t.common.resume : t.common.pause}
+                        disabled={busy || (!isPaused && !isRunning)}
+                        icon={isPaused ? <Play className="w-3 h-3" /> : <Pause className="w-3 h-3" />}
+                        onClick={() =>
+                          postMessage(isPaused ? 'pod:unpause' : 'pod:pause', {
+                            podId: pod.fullId,
+                          })
+                        }
                       />
                       <SmallActionButton
                         label={t.common.logs}
@@ -300,7 +339,7 @@ export const PodsPage: React.FC = () => {
                         onClick={() => {
                           clearLogs();
                           setLogModalPod(pod);
-                          postMessage('pod:logs', { podId: pod.id, podName: pod.name });
+                          postMessage('pod:logs', { podId: pod.fullId || pod.id, podName: pod.name });
                         }}
                       />
                       <SmallActionButton
@@ -493,7 +532,10 @@ export const PodsPage: React.FC = () => {
               <SmallActionButton
                 label={t.common.reloadLogs}
                 onClick={() =>
-                  postMessage('pod:logs', { podId: logModalPod.id, podName: logModalPod.name })
+                  postMessage('pod:logs', {
+                    podId: logModalPod.fullId || logModalPod.id,
+                    podName: logModalPod.name,
+                  })
                 }
               />
               <ActionPillButton label={t.common.close} onClick={() => setLogModalPod(null)} />
@@ -527,7 +569,7 @@ export const PodsPage: React.FC = () => {
                 label={t.pods.deleteModalTitle}
                 variant="danger"
                 onClick={() => {
-                  postMessage('pod:remove', { podId: confirmDeletePod.id });
+                  postMessage('pod:remove', { podId: confirmDeletePod.fullId || confirmDeletePod.id });
                   setConfirmDeletePod(null);
                 }}
               />

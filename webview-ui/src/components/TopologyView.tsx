@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { groupComposeContainers, summarizeComposeService } from '../composeStatus';
 import { useI18n } from '../i18n';
 import { ComposeContainerStatus, ComposeDocument } from '../store';
 import { getStatusTheme } from './Shared';
@@ -64,7 +65,7 @@ export const TopologyView: React.FC<{
   onOpenLogs,
   onSelectService,
 }) => {
-  const { t, fmt } = useI18n();
+  const { t, fmt, engine } = useI18n();
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const [positions, setPositions] = useState<Record<string, { x: number; y: number }>>({});
   const [dragging, setDragging] = useState<{
@@ -79,14 +80,12 @@ export const TopologyView: React.FC<{
   } | null>(null);
 
   const statusMap = useMemo(() => {
-    const map = new Map<string, ComposeContainerStatus>();
-    for (const c of containers) {
-      if (c.service) {
-        map.set(c.service, c);
-      }
+    const map = new Map<string, ReturnType<typeof summarizeComposeService>>();
+    for (const [service, items] of groupComposeContainers(containers)) {
+      map.set(service, summarizeComposeService(items, engine === 'podman'));
     }
     return map;
-  }, [containers]);
+  }, [containers, engine]);
 
   const activePodName = useMemo(
     () => containers.find((c) => c.podName)?.podName || '',
@@ -168,7 +167,8 @@ export const TopologyView: React.FC<{
     }
 
     for (const [svcName, svc] of services) {
-      const st = statusMap.get(svcName);
+      const summary = statusMap.get(svcName);
+      const st = summary?.container;
       const ports = extractList(svc?.ports).slice(0, 2);
       const svcNets = extractList(svc?.networks);
       const targetNets = svcNets.length > 0 ? svcNets : ['default'];
@@ -188,7 +188,7 @@ export const TopologyView: React.FC<{
             ? `ID: ${st.id}`
             : t.topology.containerStopped,
         ],
-        status: st?.status || 'stopped',
+        status: summary?.status || 'stopped',
       });
 
       for (const n of targetNets) {
