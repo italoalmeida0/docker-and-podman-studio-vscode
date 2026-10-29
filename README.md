@@ -1,0 +1,218 @@
+<div align="center">
+
+<img src="resources/icon.png" alt="Docker and Podman Studio Logo" width="136" height="136" />
+
+# Docker and Podman Studio
+
+**The all-in-one visual Studio GUI for Docker & Podman inside Visual Studio Code.**
+
+<p align="center">
+  <img src="resources/dual-engine-badge.png" alt="Dual-Engine — Docker and Podman" width="230" />
+</p>
+
+[![Visual Studio Marketplace Version](https://img.shields.io/visual-studio-marketplace/v/ItaloAlmeida.docker-and-podman-studio?color=0284c7&label=VS%20Marketplace)](https://marketplace.visualstudio.com/items?itemName=ItaloAlmeida.docker-and-podman-studio)
+[![License: MIT](https://img.shields.io/badge/License-MIT-8b5cf6.svg)](https://github.com/Italoalmeida0/docker-and-podman-studio-vscode/blob/main/LICENSE)
+[![VS Code Engine](https://img.shields.io/badge/VS%20Code-%5E1.85.0-007ACC.svg)](https://code.visualstudio.com/)
+[![Dual Engine](https://img.shields.io/badge/Engines-Docker%20%26%20Podman-0ea5e9.svg)](#dual-engine-architecture-docker--podman)
+[![Multi-Language](https://img.shields.io/badge/i18n-16%20Languages-22c55e.svg)](#multi-language-support-16-languages)
+
+Manage **Compose stacks**, **Interactive Architecture Topologies**, **Containers**, **Pods**, **OCI Images**, **Volumes**, **Networks**, **Docker Contexts**, and **Podman Machine VMs** from one sleek Studio panel — powered by **Docker** out of the box, with one-click switching to **Podman**.
+
+[VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=ItaloAlmeida.docker-and-podman-studio) · [GitHub Releases (.vsix)](https://github.com/Italoalmeida0/docker-and-podman-studio-vscode/releases) · [Report Bug](https://github.com/Italoalmeida0/docker-and-podman-studio-vscode/issues) · [Request Feature](https://github.com/Italoalmeida0/docker-and-podman-studio-vscode/issues)
+
+</div>
+
+---
+
+![Compose Studio Interactive Topology Graph](resources/screenshots/01-compose-topology.png)
+
+---
+
+## Why Developers Love Docker and Podman Studio
+
+- **Interactive Drag-and-Drop Compose Topology**: Visualize your entire `docker-compose.yml` or `podman-compose.yml` architecture — **Networks**, **Services**, **Persistent Volumes**, **Bind Mounts**, **Env Files**, and `depends_on` wires — with live health badges and right-click container actions.
+- **Dual-Engine Freedom (`Docker` Default + `Podman`)**: Uses **Docker** (`docker` + `docker compose`) out of the box and switches to **Podman** (`podman` + `podman-compose` + native Pods) with a single click in the Sidebar or Settings.
+- **Zero Context-Switching**: Stream multi-service logs, open interactive container shells (`exec -it`), switch **Docker Contexts** (Desktop, OrbStack, Colima, Remote SSH), control **Podman Machine** VMs, build `Dockerfile` / `Containerfile` images, and prune disk space without leaving VS Code.
+- **Truly Global (`16 Languages`)**: Native localization across 16 languages (`EN`, `PT-BR`, `ES`, `FR`, `DE`, `IT`, `RU`, `UK`, `PL`, `TR`, `NL`, `JA`, `KO`, `ZH-CN`, `ZH-TW`, `HI`) + automatic VS Code language detection (`auto`).
+
+---
+
+## Visual Tour
+
+### 1. Unified Engine Dashboard, Docker Contexts & Storage Analytics
+Inspect live daemon telemetry, switch between local and remote **Docker Contexts** (`desktop-linux`, `orbstack`, remote SSH hosts), and analyze reclaimable disk usage (`system df`) at a glance.
+
+![Unified Dashboard and Docker Contexts](resources/screenshots/02-dual-engine-dashboard.png)
+
+### 2. One-Click Podman Mode & Kubernetes-Style Pods
+Switch to **Podman** anytime to unlock daemonless rootless container management, **Podman Machine** VM lifecycle controls, and native **Kubernetes-style Pods** with shared network/IPC namespaces.
+
+![Podman Native Mode and Kubernetes-Style Pods](resources/screenshots/03-podman-pods.png)
+
+### 3. Real-Time Multi-Service Log Streaming
+Debug distributed stacks effortlessly with color-coded log levels, per-service filter pills, instant text search, pause/resume controls, or 1-click routing to the VS Code Output Channel and integrated Terminal.
+
+![Real-Time Multi-Service Log Streaming](resources/screenshots/04-live-logs-streaming.png)
+
+### 4. Instant Engine Selector & 16-Language Localization
+Switch between **Docker** and **Podman** or choose from **16 built-in languages** (shown below in Russian — `Русский`) directly inside Studio Settings.
+
+![16 Languages and Dual-Engine Settings](resources/screenshots/05-multilang-settings.png)
+
+---
+
+## Dual-Engine Architecture: Docker & Podman
+
+**Docker and Podman Studio** uses **Docker** (`"docker"`) by default and lets you switch to **Podman** (`"podman"`) anytime — via **Settings** (`dockerPodmanStudio.engine`), the **Studio Sidebar toggle**, the **Activity Bar** header button, or the **Command Palette** (`Docker and Podman Studio: Switch Container Engine`).
+
+| Capability | Docker Mode *(Default)* | Podman Mode |
+| :--- | :--- | :--- |
+| **CLI Runtime** | `docker` | `podman` (daemonless / rootless ready) |
+| **Compose Runner** | `docker compose` (v2 plugin) & `docker-compose` | `podman-compose` & `podman compose` |
+| **Default Scaffold Files** | `docker-compose.yml` + `Dockerfile` | `podman-compose.yml` + `Containerfile` |
+| **Host / Context Management** | **Docker Contexts** (`docker context ls` / `use`) | **Podman Machine VMs** (`start` / `stop` / `restart`) |
+| **Pod Orchestration** | Standard multi-container Compose networks | Native **Kubernetes-style Pods** + `--in-pod` grouping |
+| **Registry Integration** | `docker login` / `logout` + SecretStorage | `podman login` / `logout` + SecretStorage |
+
+---
+
+## Complete Feature Set
+
+### Visual Compose Studio (`docker compose` & `podman-compose`)
+- **Interactive Topology Graph**: Drag-and-drop canvas with right-click service context menu (`Start`, `Stop`, `Restart`, `Down`, `Live Logs`).
+- **Protected YAML Editing**: Modify individual service fragments or raw Compose YAML safely — editing automatically locks while services are running to prevent runtime drift.
+- **Visual `New Compose` Wizard**: Scaffold `docker-compose.yml` or `podman-compose.yml` stacks with live YAML preview, `Dockerfile` / `Containerfile` build configuration, healthchecks, and integrated image search across **Docker Hub**, **Quay.io**, and private OCI registries.
+- **Smart Auto-Discovery**: Automatically detects `docker-compose.yml`, `compose.yml`, `podman-compose.yml`, and `container-compose.yml` files in your workspace **and** discovers external Compose projects from active container labels.
+- **YAML IntelliSense & Diagnostics**: Real-time autocompletion and schema diagnostics for Compose files directly inside the VS Code editor.
+
+### Container, Pod & Infrastructure Management
+- **Simple & Advanced Containers**: Launch standalone or Pod-attached containers with port mappings, volume mounts, environment variables, CPU/Memory limits, and custom `--mount` specs. Open an **Interactive Terminal** (`exec -it`) in one click.
+- **Kubernetes-Style Pods *(Podman Mode)***: Create Pods with custom `--hostname`, published ports, `--network`, `--add-host`, `--cpu-shares`, and labels; inspect member & infra containers; stream Pod logs; and manage Pod lifecycles.
+- **OCI Images, Builds & Prune Suite**: Pull images, build from `Dockerfile` or `Containerfile`, push to remote registries, and reclaim disk space (`Prune Dangling`, `Prune All Unused`, `Clear Builder Cache`).
+- **Volumes & Networks**: Create, inspect (drivers, subnets, gateways, DNS, IPv6), prune, and delete volumes and networks.
+- **Encrypted Registry Authentication**: Store private registry credentials securely in **VS Code `SecretStorage`** (never written in plaintext to `settings.json`) with optional automatic `docker login` / `podman login`.
+
+---
+
+## Multi-Language Support (16 Languages)
+
+Full internationalization (**i18n**) across the Studio Webview, Status Bar, notifications, Command Palette (`package.nls.*.json`), and Settings descriptions. Follow VS Code's display language automatically (`auto`) or pick your preferred language in **Settings → Interface Language** (`dockerPodmanStudio.language`):
+
+| Code | Language | Code | Language |
+| :--- | :--- | :--- | :--- |
+| `auto` | Automatic *(VS Code Display Language)* | `pl` | Polski (Polish) |
+| `en` | English *(Fallback Default)* | `tr` | Türkçe (Turkish) |
+| `pt-BR` | Português (Brasil) | `nl` | Nederlands (Dutch) |
+| `es` | Español | `ja` | 日本語 (Japanese) |
+| `fr` | Français | `ko` | 한국어 (Korean) |
+| `de` | Deutsch | `zh-CN` | 简体中文 (Simplified Chinese) |
+| `it` | Italiano | `zh-TW` | 繁體中文 (Traditional Chinese) |
+| `ru` | Русский (Russian) | `hi` | हिन्दी (Hindi) |
+| `uk` | Українська (Ukrainian) | | |
+
+---
+
+## Requirements
+
+Only the CLI for your selected engine is required:
+
+- **For Docker Mode *(Default)***:
+  - **Docker CLI** (`docker`) and **Docker Compose** (`docker compose` v2 plugin or `docker-compose`) — compatible with Docker Desktop, Docker Engine on Linux, OrbStack, Rancher Desktop, and Colima.
+- **For Podman Mode**:
+  - **Podman CLI** (`podman` v4, v5, or v6+) and **Podman Compose** (`podman-compose` or `podman compose`).
+  - *Windows / macOS*: An initialized Podman Machine (`podman machine init`), manageable directly from the Studio Dashboard.
+
+---
+
+## Getting Started
+
+1. Install **Docker and Podman Studio** from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=ItaloAlmeida.docker-and-podman-studio) (or download the `.vsix` from [GitHub Releases](https://github.com/Italoalmeida0/docker-and-podman-studio-vscode/releases)).
+2. Open the Studio from any entry point:
+   - Click **`Docker Studio`** / **`Podman Studio`** in the bottom **Status Bar** (shows live connection status).
+   - Click the **Docker and Podman Studio** icon in the **Activity Bar**.
+   - Open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) and run **`Docker and Podman Studio: Open Studio Panel`**.
+   - Right-click any `docker-compose.yml`, `compose.yml`, `podman-compose.yml`, `Dockerfile`, or `Containerfile` in the VS Code Explorer.
+3. Want to use Podman instead of Docker? Toggle **Docker | Podman** directly in the Studio sidebar or set `"dockerPodmanStudio.engine": "podman"` in VS Code Settings.
+
+---
+
+## Commands
+
+| Command ID | Title |
+| :--- | :--- |
+| `dockerPodmanStudio.openPanel` | Docker and Podman Studio: Open Studio Panel |
+| `dockerPodmanStudio.switchEngine` | Docker and Podman Studio: Switch Container Engine (Docker / Podman) |
+| `dockerPodmanStudio.composeUp` | Docker and Podman Studio: Compose Up |
+| `dockerPodmanStudio.composeStart` | Docker and Podman Studio: Compose Start |
+| `dockerPodmanStudio.composeStop` | Docker and Podman Studio: Compose Stop |
+| `dockerPodmanStudio.composeDown` | Docker and Podman Studio: Compose Down |
+| `dockerPodmanStudio.composeRestart` | Docker and Podman Studio: Compose Restart |
+| `dockerPodmanStudio.composeBuild` | Docker and Podman Studio: Compose Build & Up |
+| `dockerPodmanStudio.registerComposeFiles` | Docker and Podman Studio: Register Compose File... |
+| `dockerPodmanStudio.createContainer` | Docker and Podman Studio: Create Container |
+| `dockerPodmanStudio.createPod` | Docker and Podman Studio: Create Podman Pod |
+| `dockerPodmanStudio.createVolume` | Docker and Podman Studio: Create Volume |
+| `dockerPodmanStudio.createNetwork` | Docker and Podman Studio: Create Network |
+| `dockerPodmanStudio.buildImage` | Docker and Podman Studio: Build Image from Dockerfile / Containerfile |
+| `dockerPodmanStudio.pushImage` | Docker and Podman Studio: Push Image to Registry |
+| `dockerPodmanStudio.pruneImages` | Docker and Podman Studio: Prune Dangling Images |
+| `dockerPodmanStudio.pruneAllImages` | Docker and Podman Studio: Prune All Unused Images |
+| `dockerPodmanStudio.pruneBuilderCache` | Docker and Podman Studio: Clear Builder Cache |
+| `dockerPodmanStudio.startMachine` | Docker and Podman Studio: Start Podman Machine |
+| `dockerPodmanStudio.stopMachine` | Docker and Podman Studio: Stop Podman Machine |
+| `dockerPodmanStudio.restartMachine` | Docker and Podman Studio: Restart Podman Machine |
+| `dockerPodmanStudio.openToolsMenu` | Docker and Podman Studio: Quick Tools |
+| `dockerPodmanStudio.resetEnginePaths` | Docker and Podman Studio: Reset Docker & Podman CLI Paths |
+
+---
+
+## Extension Settings
+
+| Setting | Default | Description |
+| :--- | :--- | :--- |
+| `dockerPodmanStudio.engine` | `"docker"` | Active container engine (`"docker"` by default, or `"podman"`). |
+| `dockerPodmanStudio.language` | `"auto"` | Interface language (`auto`, `en`, `pt-BR`, `es`, `fr`, `de`, `it`, `ru`, `uk`, `pl`, `tr`, `nl`, `ja`, `ko`, `zh-CN`, `zh-TW`, `hi`). |
+| `dockerPodmanStudio.dockerPath` | `"docker"` | Path to the `docker` executable. |
+| `dockerPodmanStudio.podmanPath` | `"podman"` | Path to the `podman` executable. |
+| `dockerPodmanStudio.composeCommandStyle` | `"auto"` | Compose execution mode: `"auto"` (`docker compose` for Docker, `podman-compose` / `podman compose` for Podman), `"plugin"`, `"standalone"`, or `"custom"`. |
+| `dockerPodmanStudio.composePath` | `""` | Optional custom Compose binary path (leave empty for automatic engine defaults). |
+| `dockerPodmanStudio.inPod` | `"default"` | Pod grouping flag (`--in-pod`) when running `podman-compose` in Podman mode. |
+| `dockerPodmanStudio.machineName` | `"podman-machine-default"` | Default Podman Machine VM name (Windows/macOS in Podman mode). |
+| `dockerPodmanStudio.pollingInterval` | `2500` | Container status polling interval in milliseconds. |
+| `dockerPodmanStudio.logBufferSize` | `5000` | Maximum number of log lines retained in memory. |
+| `dockerPodmanStudio.autoDetectFiles` | `true` | Auto-discover `docker-compose.yml`, `compose.yml`, and `podman-compose.yml` files in workspace and active containers. |
+| `dockerPodmanStudio.confirmDeletions` | `true` | Prompt for confirmation before destructive delete or prune operations. |
+| `dockerPodmanStudio.logsOutput` | `"studio"` | Default log viewer target (`"studio"`, `"outputChannel"`, or `"terminal"`). |
+| `dockerPodmanStudio.enablePushCommand` | `true` | Enable image `Push` actions in the Images page. |
+| `dockerPodmanStudio.pushDefaultRegistry` | `""` | Default target registry prefix for image pushes (e.g., `docker.io/my-user` or `quay.io/my-org`). |
+| `dockerPodmanStudio.registryProvider` | `"dockerhub"` | Registry provider (`dockerhub`, `quay`, `ghcr`, `acr`, `ecr`, `custom`). |
+| `dockerPodmanStudio.registryUrl` | `""` | Custom OCI registry host URL. |
+| `dockerPodmanStudio.registryAuthType` | `"engineCli"` | Registry authentication method (`engineCli`, `basic`, `bearer`). |
+| `dockerPodmanStudio.registryUsername` | `""` | Username for private OCI registry authentication. |
+| `dockerPodmanStudio.registryAutoLogin` | `true` | Run `docker login` / `podman login` automatically when saving credentials. |
+
+---
+
+## Development & Building from Source
+
+```bash
+git clone https://github.com/Italoalmeida0/docker-and-podman-studio-vscode.git
+cd docker-and-podman-studio-vscode
+
+# Install dependencies
+npm install
+npm --prefix webview-ui install
+
+# Build Webview UI + Extension Host bundle
+npm run build:all
+
+# Package into a .vsix installer
+npm run package
+```
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE).  
+Copyright © 2026 [Italo Almeida](https://github.com/Italoalmeida0).

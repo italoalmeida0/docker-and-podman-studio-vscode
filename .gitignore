@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+webview-ui/node_modules/
+
+# Build outputs
+dist/
+webview-ui/build/
+out/
+
+# Packaged VSIX artifacts
+*.vsix
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+.vscode-test/

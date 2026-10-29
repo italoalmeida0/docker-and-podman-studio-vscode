@@ -1,0 +1,26 @@
+# Changelog
+
+All notable changes to **Docker and Podman Studio** will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.0.0] - 2026-10-29
+
+### Added
+- **Dual-Engine Container Runtime (`Docker` Default & `Podman`)**:
+  - Instant switching between **Docker** (`docker` + `docker compose` / `docker-compose`, default) and **Podman** (`podman` + `podman-compose` / `podman compose`) via Settings (`dockerPodmanStudio.engine`), Sidebar toggle, Activity Bar, or Command Palette.
+  - **Docker Contexts** manager (`docker context ls` / `docker context use`) in Docker mode and **Podman Machine** VM lifecycle controls (`start`, `stop`, `restart`) in Podman mode.
+- **Visual Compose Studio**:
+  - Overview dashboard, interactive drag-and-drop **Topology Graph** with right-click service context menu, **Services** inspector with runtime-locked YAML fragment editing, **Variables** explorer, **Resources** manager, **Raw YAML** editor, real-time **Log Streaming**, and visual **Service Builder**.
+  - **New Compose Wizard** with `Dockerfile` & `Containerfile` support, healthcheck configurator, live YAML preview, and OCI image search across **Docker Hub**, **Quay.io**, **GHCR**, **ACR**, **ECR**, and custom registries.
+  - Smart Compose auto-discovery across workspace folders, persisted user-registered paths, and active Docker/Podman container labels.
+  - YAML IntelliSense completions and schema diagnostics for Compose files.
+- **Complete Resource Management**:
+  - **Dashboard**: Daemon/engine health, contexts/machines, host specifications, and `system df` disk usage breakdown.
+  - **Containers**: Simple & Advanced creation wizards, Interactive Terminal (`exec -it`), and multi-target log viewing (Studio, Output Channel, Terminal).
+  - **Pods *(Podman Mode)***: Create Kubernetes-style Pods (`--hostname`, `-p`, `--network`, `--add-host`, `--cpu-shares`, `--label`), inspect member containers, stream Pod logs, and control lifecycles.
+  - **OCI Images**: Pull, Build from `Dockerfile` / `Containerfile`, Push to registries, and Prune suite (dangling images, unused images, builder cache).
+  - **Volumes & Networks**: Full CRUD, driver/subnet/DNS/IPv6 inspection, and unused volume pruning.
+  - **Encrypted Private Registry Auth**: Backed by VS Code `SecretStorage` with automatic `docker login` / `podman login` integration.
+- **Multi-Language Support (16 Languages + `auto`)**:
+  - Full UI, Status Bar, notifications, Command Palette (`package.nls.*.json`), and Settings localization for English (`en`), Portuguese (`pt-BR`), Spanish (`es`), French (`fr`), German (`de`), Italian (`it`), Russian (`ru`), Ukrainian (`uk`), Polish (`pl`), Turkish (`tr`), Dutch (`nl`), Japanese (`ja`), Korean (`ko`), Simplified Chinese (`zh-CN`), Traditional Chinese (`zh-TW`), and Hindi (`hi`).

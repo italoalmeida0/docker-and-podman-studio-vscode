@@ -1,0 +1,37 @@
+name: Build & Package VSIX
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: Build Extension & Webview UI
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install extension dependencies
+        run: npm ci
+
+      - name: Install webview-ui dependencies
+        run: npm --prefix webview-ui ci
+
+      - name: Typecheck extension host
+        run: npx tsc --noEmit
+
+      - name: Build webview-ui & extension bundle
+        run: npm run build:all
+
+      - name: Package VSIX
+        run: npx @vscode/vsce package --no-dependencies

@@ -1,0 +1,443 @@
+{
+  "name": "docker-and-podman-studio",
+  "displayName": "%ext.displayName%",
+  "description": "%ext.description%",
+  "version": "1.0.0",
+  "publisher": "ItaloAlmeida",
+  "author": {
+    "name": "Italo Almeida",
+    "url": "https://github.com/Italoalmeida0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Italoalmeida0/docker-and-podman-studio-vscode.git"
+  },
+  "homepage": "https://github.com/Italoalmeida0/docker-and-podman-studio-vscode#readme",
+  "bugs": {
+    "url": "https://github.com/Italoalmeida0/docker-and-podman-studio-vscode/issues"
+  },
+  "galleryBanner": {
+    "color": "#0f172a",
+    "theme": "dark"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "keywords": [
+    "docker",
+    "docker-compose",
+    "podman",
+    "podman-compose",
+    "compose",
+    "containers",
+    "pods",
+    "dockerfile",
+    "containerfile",
+    "oci",
+    "devops"
+  ],
+  "icon": "resources/icon.png",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "dockerPodmanStudio.openPanel",
+        "title": "%cmd.openPanel%",
+        "icon": "$(window)"
+      },
+      {
+        "command": "dockerPodmanStudio.switchEngine",
+        "title": "%cmd.switchEngine%",
+        "icon": "$(arrow-swap)"
+      },
+      {
+        "command": "dockerPodmanStudio.composeUp",
+        "title": "%cmd.composeUp%",
+        "icon": "$(play)"
+      },
+      {
+        "command": "dockerPodmanStudio.composeStart",
+        "title": "%cmd.composeStart%",
+        "icon": "$(play)"
+      },
+      {
+        "command": "dockerPodmanStudio.composeStop",
+        "title": "%cmd.composeStop%",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "dockerPodmanStudio.composeDown",
+        "title": "%cmd.composeDown%",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "dockerPodmanStudio.composeRestart",
+        "title": "%cmd.composeRestart%",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "dockerPodmanStudio.composeBuild",
+        "title": "%cmd.composeBuild%",
+        "icon": "$(package)"
+      },
+      {
+        "command": "dockerPodmanStudio.registerComposeFiles",
+        "title": "%cmd.registerComposeFiles%",
+        "icon": "$(file-add)"
+      },
+      {
+        "command": "dockerPodmanStudio.startMachine",
+        "title": "%cmd.startMachine%",
+        "icon": "$(vm-running)"
+      },
+      {
+        "command": "dockerPodmanStudio.stopMachine",
+        "title": "%cmd.stopMachine%",
+        "icon": "$(vm-outline)"
+      },
+      {
+        "command": "dockerPodmanStudio.restartMachine",
+        "title": "%cmd.restartMachine%",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "dockerPodmanStudio.createPod",
+        "title": "%cmd.createPod%",
+        "icon": "$(add)"
+      },
+      {
+        "command": "dockerPodmanStudio.createContainer",
+        "title": "%cmd.createContainer%",
+        "icon": "$(add)"
+      },
+      {
+        "command": "dockerPodmanStudio.createVolume",
+        "title": "%cmd.createVolume%",
+        "icon": "$(database)"
+      },
+      {
+        "command": "dockerPodmanStudio.createNetwork",
+        "title": "%cmd.createNetwork%",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "dockerPodmanStudio.buildImage",
+        "title": "%cmd.buildImage%",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "dockerPodmanStudio.pushImage",
+        "title": "%cmd.pushImage%",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "dockerPodmanStudio.pruneImages",
+        "title": "%cmd.pruneImages%",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "dockerPodmanStudio.pruneAllImages",
+        "title": "%cmd.pruneAllImages%",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "dockerPodmanStudio.pruneBuilderCache",
+        "title": "%cmd.pruneBuilderCache%",
+        "icon": "$(flame)"
+      },
+      {
+        "command": "dockerPodmanStudio.openToolsMenu",
+        "title": "%cmd.openToolsMenu%",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "dockerPodmanStudio.resetEnginePaths",
+        "title": "%cmd.resetEnginePaths%",
+        "icon": "$(discard)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "dockerPodmanStudio",
+          "title": "Docker and Podman Studio",
+          "icon": "resources/studio-activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "dockerPodmanStudio": [
+        {
+          "id": "dockerPodmanStudio.launcher",
+          "name": "Docker and Podman Studio",
+          "icon": "resources/studio-activity.svg",
+          "type": "webview"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "dockerPodmanStudio.openPanel",
+          "when": "view == dockerPodmanStudio.launcher",
+          "group": "navigation@1"
+        },
+        {
+          "command": "dockerPodmanStudio.switchEngine",
+          "when": "view == dockerPodmanStudio.launcher",
+          "group": "navigation@2"
+        },
+        {
+          "command": "dockerPodmanStudio.openToolsMenu",
+          "when": "view == dockerPodmanStudio.launcher",
+          "group": "navigation@3"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "dockerPodmanStudio.registerComposeFiles",
+          "when": "resourceExtname == .yml || resourceExtname == .yaml",
+          "group": "2_workspace@1"
+        },
+        {
+          "command": "dockerPodmanStudio.composeUp",
+          "when": "resourceExtname == .yml || resourceExtname == .yaml",
+          "group": "2_workspace@2"
+        },
+        {
+          "command": "dockerPodmanStudio.buildImage",
+          "when": "resourceFilename == Dockerfile || resourceFilename == Containerfile || resourceExtname == .dockerfile || resourceExtname == .containerfile",
+          "group": "2_workspace@3"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Docker and Podman Studio",
+      "properties": {
+        "dockerPodmanStudio.engine": {
+          "type": "string",
+          "default": "docker",
+          "enum": [
+            "docker",
+            "podman"
+          ],
+          "enumDescriptions": [
+            "Docker Engine & Docker Compose (Default)",
+            "Podman Engine, Pods & Podman Compose"
+          ],
+          "order": 1,
+          "description": "%cfg.engine%"
+        },
+        "dockerPodmanStudio.language": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "en",
+            "pt-BR",
+            "es",
+            "fr",
+            "de",
+            "it",
+            "ru",
+            "uk",
+            "pl",
+            "tr",
+            "nl",
+            "ja",
+            "ko",
+            "zh-CN",
+            "zh-TW",
+            "hi"
+          ],
+          "enumDescriptions": [
+            "Follow VS Code Display Language automatically",
+            "English",
+            "Português (Brasil)",
+            "Español",
+            "Français",
+            "Deutsch",
+            "Italiano",
+            "Русский (Russian)",
+            "Українська (Ukrainian)",
+            "Polski (Polish)",
+            "Türkçe (Turkish)",
+            "Nederlands (Dutch)",
+            "日本語 (Japanese)",
+            "한국어 (Korean)",
+            "简体中文 (Simplified Chinese)",
+            "繁體中文 (Traditional Chinese)",
+            "हिन्दी (Hindi)"
+          ],
+          "order": 2,
+          "description": "%cfg.language%"
+        },
+        "dockerPodmanStudio.dockerPath": {
+          "type": "string",
+          "default": "docker",
+          "order": 3,
+          "description": "%cfg.dockerPath%"
+        },
+        "dockerPodmanStudio.podmanPath": {
+          "type": "string",
+          "default": "podman",
+          "order": 4,
+          "description": "%cfg.podmanPath%"
+        },
+        "dockerPodmanStudio.composeCommandStyle": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "plugin",
+            "standalone",
+            "custom"
+          ],
+          "order": 5,
+          "description": "%cfg.composeCommandStyle%"
+        },
+        "dockerPodmanStudio.composePath": {
+          "type": "string",
+          "default": "",
+          "order": 6,
+          "description": "%cfg.composePath%"
+        },
+        "dockerPodmanStudio.inPod": {
+          "type": "string",
+          "default": "default",
+          "enum": [
+            "default",
+            "true",
+            "false"
+          ],
+          "order": 7,
+          "description": "%cfg.inPod%"
+        },
+        "dockerPodmanStudio.machineName": {
+          "type": "string",
+          "default": "podman-machine-default",
+          "order": 8,
+          "description": "%cfg.machineName%"
+        },
+        "dockerPodmanStudio.pollingInterval": {
+          "type": "number",
+          "default": 2500,
+          "minimum": 500,
+          "order": 9,
+          "description": "%cfg.pollingInterval%"
+        },
+        "dockerPodmanStudio.logBufferSize": {
+          "type": "number",
+          "default": 5000,
+          "minimum": 100,
+          "order": 10,
+          "description": "%cfg.logBufferSize%"
+        },
+        "dockerPodmanStudio.autoDetectFiles": {
+          "type": "boolean",
+          "default": true,
+          "order": 11,
+          "description": "%cfg.autoDetectFiles%"
+        },
+        "dockerPodmanStudio.confirmDeletions": {
+          "type": "boolean",
+          "default": true,
+          "order": 12,
+          "description": "%cfg.confirmDeletions%"
+        },
+        "dockerPodmanStudio.logsOutput": {
+          "type": "string",
+          "default": "studio",
+          "enum": [
+            "studio",
+            "outputChannel",
+            "terminal"
+          ],
+          "order": 13,
+          "description": "%cfg.logsOutput%"
+        },
+        "dockerPodmanStudio.enablePushCommand": {
+          "type": "boolean",
+          "default": true,
+          "order": 14,
+          "description": "%cfg.enablePushCommand%"
+        },
+        "dockerPodmanStudio.pushDefaultRegistry": {
+          "type": "string",
+          "default": "",
+          "order": 15,
+          "description": "%cfg.pushDefaultRegistry%"
+        },
+        "dockerPodmanStudio.registryProvider": {
+          "type": "string",
+          "default": "dockerhub",
+          "enum": [
+            "dockerhub",
+            "quay",
+            "ghcr",
+            "acr",
+            "ecr",
+            "custom"
+          ],
+          "order": 16,
+          "description": "%cfg.registryProvider%"
+        },
+        "dockerPodmanStudio.registryUrl": {
+          "type": "string",
+          "default": "",
+          "order": 17,
+          "description": "%cfg.registryUrl%"
+        },
+        "dockerPodmanStudio.registryAuthType": {
+          "type": "string",
+          "default": "engineCli",
+          "enum": [
+            "engineCli",
+            "basic",
+            "bearer"
+          ],
+          "order": 18,
+          "description": "%cfg.registryAuthType%"
+        },
+        "dockerPodmanStudio.registryUsername": {
+          "type": "string",
+          "default": "",
+          "order": 19,
+          "description": "%cfg.registryUsername%"
+        },
+        "dockerPodmanStudio.registryAutoLogin": {
+          "type": "boolean",
+          "default": true,
+          "order": 20,
+          "description": "%cfg.registryAutoLogin%"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build:all",
+    "build:ui": "npm --prefix webview-ui run build",
+    "build": "node esbuild.js --production",
+    "build:all": "npm run build:ui && npm run build",
+    "watch": "node esbuild.js --watch",
+    "package": "npx @vscode/vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.5.0"
+  },
+  "dependencies": {
+    "yaml": "^2.6.0"
+  }
+}
