@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as vscode from 'vscode';
+import { getConfig } from '../config';
 import { ComposeContainerStatus, ComposeDocument } from '../types';
 import { PodmanService } from './podmanService';
 import { YamlService } from './yamlService';
@@ -8,6 +9,7 @@ export class StatusProvider implements vscode.Disposable {
   private containers: ComposeContainerStatus[] = [];
   private pollTimer: NodeJS.Timeout | undefined;
   private activeFile: string | undefined;
+  private contextKey: string | undefined;
   private pollingGeneration: number | undefined;
   private generation = 0;
   private lastError = '';
@@ -21,16 +23,28 @@ export class StatusProvider implements vscode.Disposable {
     private readonly yaml: YamlService
   ) {}
 
-  public startPolling(composeFile: string, intervalMs = 2500): void {
-    const changedFile = this.activeFile !== composeFile;
-    this.stopPolling();
-    this.activeFile = composeFile;
-    if (changedFile) {
-      this.lastError = '';
-    }
-    if (changedFile && this.containers.length > 0) {
+  private clearContainers(): void {
+    if (this.containers.length > 0) {
       this.containers = [];
       this._onStatusChange.fire(this.containers);
+    }
+  }
+
+  public startPolling(composeFile: string, intervalMs = 2500): void {
+    const changedFile = this.activeFile !== composeFile;
+    const cfg = getConfig();
+    const nextContext = JSON.stringify([
+      cfg.engine, cfg.dockerPath, cfg.podmanPath, cfg.composePath, cfg.composeCommandStyle, cfg.inPod,
+    ]);
+    const changedContext = this.contextKey !== nextContext;
+    this.stopPolling();
+    this.activeFile = composeFile;
+    this.contextKey = nextContext;
+    if (changedFile || changedContext) {
+      this.lastError = '';
+    }
+    if (changedFile || changedContext) {
+      this.clearContainers();
     }
     void this.poll();
     this.pollTimer = setInterval(() => {
@@ -47,6 +61,13 @@ export class StatusProvider implements vscode.Disposable {
     this.activeFile = undefined;
   }
 
+  public clearActiveFile(): void {
+    this.stopPolling();
+    this.contextKey = undefined;
+    this.lastError = '';
+    this.clearContainers();
+  }
+
   public getContainers(): ComposeContainerStatus[] {
     return this.containers;
   }
@@ -60,16 +81,18 @@ export class StatusProvider implements vscode.Disposable {
     this.pollingGeneration = generation;
     try {
       let doc: ComposeDocument | undefined;
-      if (fs.existsSync(file)) {
-        try {
-          doc = this.yaml.parse(fs.readFileSync(file, 'utf-8'));
-        } catch {
-          // ignore invalid yaml while typing
-        }
+      const content = fs.readFileSync(file, 'utf-8');
+      try {
+        doc = this.yaml.parse(content);
+      } catch {
+        // ignore invalid yaml while typing
       }
       const next = await this.podman.composePs(file, doc);
       if (generation !== this.generation) {
         return this.containers;
+      }
+      if (!fs.existsSync(file)) {
+        throw new Error(`Compose file is unavailable: ${file}`);
       }
       this.lastError = '';
       const changed = JSON.stringify(next) !== JSON.stringify(this.containers);
@@ -78,10 +101,18 @@ export class StatusProvider implements vscode.Disposable {
         this._onStatusChange.fire(this.containers);
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (generation === this.generation && message !== this.lastError) {
-        this.lastError = message;
-        this._onError.fire(message);
+      if (generation === this.generation) {
+        const unavailable = !fs.existsSync(file);
+        if (unavailable) {
+          this.clearContainers();
+        }
+        const message = unavailable
+          ? `Compose file is unavailable: ${file}`
+          : error instanceof Error ? error.message : String(error);
+        if (message !== this.lastError) {
+          this.lastError = message;
+          this._onError.fire(message);
+        }
       }
     } finally {
       if (this.pollingGeneration === generation) {

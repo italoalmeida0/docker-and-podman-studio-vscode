@@ -4,6 +4,24 @@ All notable changes to **Docker and Podman Studio** will be documented in this f
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-10-30
+
+### Added
+- Multi-selection for images, unused volumes and networks, and Compose services, including batch lifecycle and build actions for selected services.
+- Visible progress indicators, persistent error messages, and access to the Studio output channel for operation diagnostics.
+- Unused volume and network cleanup with explicit candidate names and confirmation, including named and anonymous volumes.
+
+### Changed
+- Podman pods and their containers, including empty pods, are grouped in the Containers tree; other Compose containers are grouped by project.
+- VS Code activity bar, status bar, and Studio tab icons use branding based on the original extension icon.
+- Cleanup protects default networks and resources referenced by stopped containers, and rechecks resource identities before removal without force.
+
+### Fixed
+- Prevented stale resource and Compose status updates when switching engines or changing the active Compose file.
+- Reported unavailable Compose files clearly and cleared their stale status.
+- Added timeouts, cancellation, and visible errors for registry connection tests and Compose image searches.
+- The Studio sidebar now displays the installed extension version instead of a hard-coded version.
+
 ## [1.1.0] - 2026-10-29
 
 ### Added

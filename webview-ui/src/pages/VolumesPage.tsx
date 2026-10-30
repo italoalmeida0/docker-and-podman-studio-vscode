@@ -7,9 +7,12 @@ import {
   SmallActionButton,
   StatCard,
 } from '../components/Shared';
+import { SelectionBar, useResourceSelection } from '../components/ResourceSelection';
 import { useI18n } from '../i18n';
-import { useStudioStore } from '../store';
+import { PodmanVolume, useStudioStore } from '../store';
 import { useVsCodeMessaging } from '../vscode';
+
+const volumeSelectionKey = (volume: PodmanVolume) => `${volume.name}\0${volume.created}`;
 
 export const VolumesPage: React.FC = () => {
   const { postMessage } = useVsCodeMessaging();
@@ -17,6 +20,7 @@ export const VolumesPage: React.FC = () => {
   const { volumes, operationInProgress } = useStudioStore();
 
   const [search, setSearch] = useState('');
+  const [usageFilter, setUsageFilter] = useState<'all' | 'unused' | 'inUse'>('all');
   const [showCreate, setShowCreate] = useState(false);
   const [volName, setVolName] = useState('');
   const [volDriver, setVolDriver] = useState('local');
@@ -26,18 +30,32 @@ export const VolumesPage: React.FC = () => {
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) {
-      return volumes;
-    }
     return volumes.filter(
       (v) =>
-        v.name.toLowerCase().includes(q) ||
-        v.mountpoint.toLowerCase().includes(q) ||
-        v.composeProject.toLowerCase().includes(q)
+        (usageFilter === 'all' || v.usage === usageFilter) &&
+        (!q || v.name.toLowerCase().includes(q) ||
+          v.mountpoint.toLowerCase().includes(q) ||
+          v.composeProject.toLowerCase().includes(q))
     );
-  }, [volumes, search]);
+  }, [volumes, search, usageFilter]);
 
   const composeVolCount = volumes.filter((v) => Boolean(v.composeProject)).length;
+  const selectable = useMemo(
+    () => volumes.filter((volume) => volume.usage === 'unused' && Boolean(volume.created)),
+    [volumes]
+  );
+  const visibleSelectable = useMemo(
+    () => filtered.filter((volume) => volume.usage === 'unused' && Boolean(volume.created)),
+    [filtered]
+  );
+  const selection = useResourceSelection(selectable, visibleSelectable, volumeSelectionKey, engine);
+  const removeVolumes = (selected: PodmanVolume[]) => {
+    postMessage('resource:remove:batch', {
+      resource: 'volume',
+      engine,
+      targets: selected.map((volume) => ({ name: volume.name, identity: volume.created })),
+    });
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -79,11 +97,16 @@ export const VolumesPage: React.FC = () => {
 
       {/* Content */}
       <div className="flex-1 overflow-auto p-6 space-y-5">
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-4 gap-3">
           <StatCard
             label={t.volumes.statTotal}
             value={volumes.length}
             detail={t.volumes.statTotalDetail}
+          />
+          <StatCard
+            label={t.images.filterUnused}
+            value={volumes.filter((v) => v.usage === 'unused').length}
+            detail={t.common.usageHint}
           />
           <StatCard
             label={t.volumes.statCompose}
@@ -97,16 +120,41 @@ export const VolumesPage: React.FC = () => {
           />
         </div>
 
-        <div className="relative">
-          <Search className="w-4 h-4 text-text-muted absolute left-3 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder={t.volumes.searchPlaceholder}
-            className="input-field pl-9"
-          />
+        <div className="flex items-center gap-3 flex-wrap">
+          <div className="relative flex-1 min-w-[220px]">
+            <Search className="w-4 h-4 text-text-muted absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={t.volumes.searchPlaceholder}
+              className="input-field pl-9"
+            />
+          </div>
+          <div className="flex items-center gap-1 bg-panel-card border border-panel-border rounded-md p-1">
+            {([['all', t.common.all], ['unused', t.images.filterUnused], ['inUse', t.images.filterInUse]] as const).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setUsageFilter(id)}
+                className={`px-2.5 py-1 text-xs rounded ${usageFilter === id ? 'bg-accent-purple text-white' : 'text-text-secondary'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
+        <p className="text-xs text-text-secondary">{t.common.usageHint}</p>
+
+        <SelectionBar selection={selection} busy={busy}>
+          <SmallActionButton
+            label={`${t.common.delete} (${selection.selected.length})`}
+            danger
+            disabled={busy}
+            icon={<Trash2 className="w-3 h-3" />}
+            onClick={() => removeVolumes(selection.selected)}
+          />
+        </SelectionBar>
 
         {filtered.length === 0 ? (
           <EmptyState
@@ -129,13 +177,23 @@ export const VolumesPage: React.FC = () => {
                 key={v.name}
                 className="bg-panel-card border border-panel-border rounded-md px-4 py-3.5 flex items-center justify-between gap-4 shadow-card"
               >
-                <div className="min-w-0 space-y-1">
+                <input
+                  type="checkbox"
+                  aria-label={fmt(t.common.selectResource, { name: v.name })}
+                  checked={selection.selectedIds.has(volumeSelectionKey(v))}
+                  disabled={busy || v.usage !== 'unused' || !v.created}
+                  onChange={() => selection.toggle(volumeSelectionKey(v))}
+                />
+                <div className="min-w-0 flex-1 space-y-1">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-semibold text-sm text-text-primary font-mono break-all">
                       {v.name}
                     </span>
                     <span className="px-2 py-0.5 text-[10px] rounded bg-panel-bg border border-panel-border text-text-secondary">
                       {v.driver}
+                    </span>
+                    <span className="px-2 py-0.5 text-[10px] rounded bg-panel-bg border border-panel-border text-text-secondary" title={t.common.usageHint}>
+                      {v.usage === 'unused' ? t.images.filterUnused : t.images.filterInUse}
                     </span>
                     {v.composeProject && (
                       <span className="px-2 py-0.5 text-[10px] rounded bg-purple-500/15 text-accent-purple border border-accent-purple font-mono">
@@ -151,9 +209,9 @@ export const VolumesPage: React.FC = () => {
                 <SmallActionButton
                   label={t.common.delete}
                   danger
-                  disabled={busy}
+                  disabled={busy || v.usage !== 'unused' || !v.created}
                   icon={<Trash2 className="w-3 h-3" />}
-                  onClick={() => postMessage('volume:remove', { volumeName: v.name })}
+                  onClick={() => removeVolumes([v])}
                 />
               </div>
             ))}

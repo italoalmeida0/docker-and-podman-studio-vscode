@@ -29,6 +29,26 @@ export interface StudioMessage<T = any> {
   command: string;
   payload?: T;
   requestId?: string;
+  engine?: 'docker' | 'podman';
+}
+
+export function createEngineMessageGate() {
+  const pending = new Map<string, StudioMessage>();
+  return {
+    shouldHandle(message: StudioMessage, engine: 'docker' | 'podman', settingsLoaded: boolean): boolean {
+      if (!message.engine) return true;
+      if (!settingsLoaded) {
+        pending.set(`${message.engine}\0${message.command}`, message);
+        return false;
+      }
+      return message.engine === engine;
+    },
+    drain(engine: 'docker' | 'podman'): StudioMessage[] {
+      const messages = [...pending.values()].filter((message) => message.engine === engine);
+      pending.clear();
+      return messages;
+    },
+  };
 }
 
 export function postStudioMessage(command: string, payload?: any, requestId?: string): void {

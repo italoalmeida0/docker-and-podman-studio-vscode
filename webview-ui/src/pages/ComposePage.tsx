@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { CreateComposeModal } from '../components/CreateComposeModal';
 import { LogViewer } from '../components/LogViewer';
+import { SelectionBar, useResourceSelection } from '../components/ResourceSelection';
 import {
   ActionPillButton,
   CodeBlockCard,
@@ -44,6 +45,8 @@ type ComposeTab =
   | 'yaml'
   | 'logs'
   | 'builder';
+
+const serviceSelectionKey = (name: string) => name;
 
 function toStringList(value: any): string[] {
   if (!value) {
@@ -140,6 +143,19 @@ export const ComposePage: React.FC = () => {
     () => Object.entries(document?.services || {}),
     [document]
   );
+  const serviceNames = useMemo(() => servicesEntries.map(([name]) => name), [servicesEntries]);
+  const serviceSelection = useResourceSelection(
+    serviceNames, serviceNames, serviceSelectionKey, `${engine}\0${activeFile || ''}`
+  );
+  const runSelectedServices = (action: 'up' | 'stop' | 'restart' | 'down' | 'build') => {
+    postMessage('stack:services:batch', {
+      action,
+      services: serviceSelection.selected,
+      file: activeFile,
+      engine,
+      rawYaml,
+    });
+  };
 
   const summaryByService = useMemo(() => {
     const map = new Map<string, ReturnType<typeof summarizeComposeService>>();
@@ -623,6 +639,45 @@ export const ComposePage: React.FC = () => {
             {/* TAB 3: SERVICES */}
             {tab === 'services' && (
               <div className="space-y-3">
+                <SelectionBar selection={serviceSelection} busy={busy}>
+                  <SmallActionButton
+                    label={`${t.common.start} (${serviceSelection.selected.length})`}
+                    accent
+                    disabled={busy}
+                    icon={<Play className="w-3 h-3" />}
+                    title={t.compose.batchUpHint}
+                    onClick={() => runSelectedServices('up')}
+                  />
+                  <SmallActionButton
+                    label={`${t.common.stop} (${serviceSelection.selected.length})`}
+                    disabled={busy}
+                    icon={<Square className="w-3 h-3" />}
+                    onClick={() => runSelectedServices('stop')}
+                  />
+                  <SmallActionButton
+                    label={`${t.common.restart} (${serviceSelection.selected.length})`}
+                    disabled={busy}
+                    icon={<RotateCcw className="w-3 h-3" />}
+                    onClick={() => runSelectedServices('restart')}
+                  />
+                  <SmallActionButton
+                    label={`${t.common.build} (${serviceSelection.selected.length})`}
+                    disabled={busy}
+                    icon={<Hammer className="w-3 h-3" />}
+                    title={t.compose.batchUpHint}
+                    onClick={() => runSelectedServices('build')}
+                  />
+                  <SmallActionButton
+                    label={`${t.common.down} (${serviceSelection.selected.length})`}
+                    danger
+                    disabled={busy}
+                    icon={<Trash2 className="w-3 h-3" />}
+                    onClick={() => runSelectedServices('down')}
+                  />
+                </SelectionBar>
+                {serviceSelection.selected.length > 0 && (
+                  <p className="text-xs text-text-secondary">{t.compose.batchUpHint}</p>
+                )}
                 {servicesEntries.map(([svcName, svc]) => {
                   const summary = summaryByService.get(svcName);
                   const st = summary?.container;
@@ -638,6 +693,13 @@ export const ComposePage: React.FC = () => {
                       className="bg-panel-card border border-panel-border rounded-md overflow-hidden shadow-card"
                     >
                       <div className="px-4 py-3.5 flex items-center justify-between gap-4 flex-wrap">
+                        <input
+                          type="checkbox"
+                          aria-label={fmt(t.common.selectResource, { name: svcName })}
+                          checked={serviceSelection.selectedIds.has(svcName)}
+                          disabled={busy}
+                          onChange={() => serviceSelection.toggle(svcName)}
+                        />
                         <div
                           className="flex items-center gap-3 min-w-0 flex-1 cursor-pointer"
                           onClick={() =>

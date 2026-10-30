@@ -54,7 +54,7 @@ $env:PODMAN_INTEGRATION_TESTS = '1'
 $env:PODMAN_TEST_IMAGE = 'docker.io/library/redis:7-alpine'
 # Optional: an existing writable directory for temporary Compose and build files.
 $env:PODMAN_TEST_ROOT = $env:TEMP
-node --test tests\podman.integration.test.cjs
+node --test tests\podman.integration.test.cjs tests\studio-resources.integration.test.cjs
 ```
 
 On Linux or macOS:
@@ -63,10 +63,10 @@ On Linux or macOS:
 export PODMAN_INTEGRATION_TESTS=1
 export PODMAN_TEST_IMAGE=docker.io/library/redis:7-alpine
 # Optional: export PODMAN_TEST_ROOT=/path/to/existing/writable/directory
-node --test tests/podman.integration.test.cjs
+node --test tests/podman.integration.test.cjs tests/studio-resources.integration.test.cjs
 ```
 
-The image is checked locally rather than pulled automatically. The tests cover runtime-scaled replica lifecycle/logs and Down directly after scale-up, both standalone and grouped into a pod. They report cleanup failures explicitly. Podman 6.1.4 with podman-compose 1.6.0 on Windows has been exercised; other Podman versions, operating systems, and Compose providers should also be tested in their own environments.
+The image is checked locally rather than pulled automatically. The tests cover runtime-scaled replica lifecycle/logs, selected service builds and removal, and cleanup eligibility for volumes and networks referenced by stopped containers, using only isolated fixtures. They report cleanup failures explicitly. Podman 6.1.4 with podman-compose 1.6.0 on Windows has been exercised; other Podman versions, operating systems, and Compose providers should also be tested in their own environments.
 
 To additionally exercise Studio and its interactive shell and logs terminals in an isolated VS Code Extension Development Host on Windows, run from the repository root:
 

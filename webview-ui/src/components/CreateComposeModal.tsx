@@ -10,7 +10,11 @@ export const CreateComposeModal: React.FC<{
 }> = ({ onClose }) => {
   const { t, fmt, engine, engineLabel } = useI18n();
   const { postMessage } = useVsCodeMessaging();
-  const { selectedDirectory, imageResults, setImageResults } = useStudioStore();
+  const {
+    selectedDirectory, imageResults, setImageResults, imageSearchError,
+    setImageSearchError, operationsInProgress,
+  } = useStudioStore();
+  const searching = Boolean(operationsInProgress['image-search']);
 
   const defaultComposeFile = engine === 'podman' ? 'podman-compose.yml' : 'docker-compose.yml';
   const defaultDockerfile = engine === 'podman' ? 'Containerfile' : 'Dockerfile';
@@ -48,6 +52,19 @@ export const CreateComposeModal: React.FC<{
   const [hcTimeout, setHcTimeout] = useState('5s');
   const [hcRetries, setHcRetries] = useState('3');
   const [hcStartPeriod, setHcStartPeriod] = useState('10s');
+
+  const searchRegistry = () => {
+    if (searching) return;
+    setImageResults([]);
+    setImageSearchError(null);
+    postMessage('compose:image:search', { registryType, registryUrl, query: searchQuery });
+  };
+
+  useEffect(() => {
+    setImageResults([]);
+    setImageSearchError(null);
+    return () => postMessage('compose:image:search', { query: '' });
+  }, [postMessage, setImageResults, setImageSearchError]);
 
   useEffect(() => {
     if (selectedDirectory) {
@@ -337,11 +354,7 @@ export const CreateComposeModal: React.FC<{
                         onChange={(e) => setSearchQuery(e.target.value)}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter') {
-                            postMessage('compose:image:search', {
-                              registryType,
-                              registryUrl,
-                              query: searchQuery,
-                            });
+                            searchRegistry();
                           }
                         }}
                         placeholder={t.wizard.searchRegistryPlaceholder}
@@ -349,14 +362,9 @@ export const CreateComposeModal: React.FC<{
                       />
                       <ActionPillButton
                         label={t.common.search}
+                        loading={searching}
                         icon={<Search className="w-3.5 h-3.5" />}
-                        onClick={() =>
-                          postMessage('compose:image:search', {
-                            registryType,
-                            registryUrl,
-                            query: searchQuery,
-                          })
-                        }
+                        onClick={searchRegistry}
                       />
                     </div>
                     {registryType === 'custom' && (
@@ -367,6 +375,18 @@ export const CreateComposeModal: React.FC<{
                         placeholder="registry.company.local:5000"
                         className="input-field font-mono text-xs"
                       />
+                    )}
+                    {imageSearchError && (
+                      <p role="alert" className="text-xs text-accent-red">
+                        {imageSearchError}{' '}
+                        <button
+                          type="button"
+                          className="underline underline-offset-2"
+                          onClick={() => postMessage('output:show')}
+                        >
+                          {t.common.showOutput}
+                        </button>
+                      </p>
                     )}
                     {imageResults.length > 0 && (
                       <div className="max-h-36 overflow-auto space-y-1 pt-1">

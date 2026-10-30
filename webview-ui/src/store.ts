@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { create } from 'zustand';
-import { useVsCodeMessaging } from './vscode';
+import { createEngineMessageGate, StudioMessage, useVsCodeMessaging } from './vscode';
 
 export type ContainerEngine = 'docker' | 'podman';
 
@@ -176,6 +176,7 @@ export interface PodmanVolume {
   anonymous: boolean;
   composeProject: string;
   labels: Record<string, string>;
+  usage: 'unused' | 'inUse';
 }
 
 export interface PodmanSubnet {
@@ -185,6 +186,7 @@ export interface PodmanSubnet {
 
 export interface PodmanNetwork {
   id: string;
+  fullId: string;
   name: string;
   driver: string;
   networkInterface: string;
@@ -194,6 +196,8 @@ export interface PodmanNetwork {
   internal: boolean;
   ipv6Enabled: boolean;
   composeProject: string;
+  usage: 'unused' | 'inUse';
+  protected: boolean;
 }
 
 export interface PodmanMachine {
@@ -275,6 +279,7 @@ export interface ImageSearchResult {
 export interface StudioSettings {
   engine: ContainerEngine;
   language: LanguageSetting;
+  extensionVersion?: string;
   resolvedLanguage?: SupportedLocale;
   vscodeLanguage?: string;
   dockerPath: string;
@@ -301,7 +306,6 @@ export interface StudioSettings {
 export type PageId =
   | 'dashboard'
   | 'compose'
-  | 'pods'
   | 'containers'
   | 'images'
   | 'volumes'
@@ -335,8 +339,11 @@ interface StudioState {
   composeContainers: ComposeContainerStatus[];
   selectedDirectory: string | null;
   imageResults: ImageSearchResult[];
+  imageSearchError: string | null;
   operationInProgress: string | null;
   operationsInProgress: Record<string, number>;
+  operationLabels: Record<string, string>;
+  operationTokens: Record<string, { key: string; label: string }>;
 
   // Engine resources
   systemInfo: PodmanSystemInfo | null;
@@ -372,8 +379,9 @@ interface StudioState {
   setComposeContainers: (containers: ComposeContainerStatus[]) => void;
   setSelectedDirectory: (dir: string | null) => void;
   setImageResults: (results: ImageSearchResult[]) => void;
-  beginOperation: (op: string) => void;
-  endOperation: (op: string) => void;
+  setImageSearchError: (message: string | null) => void;
+  beginOperation: (op: string, label?: string, id?: string) => void;
+  endOperation: (op: string, id?: string) => void;
   setSystemInfo: (info: PodmanSystemInfo | null) => void;
   setDiskUsage: (items: PodmanDiskUsageItem[]) => void;
   setDockerContexts: (contexts: DockerContextItem[]) => void;
@@ -395,6 +403,21 @@ interface StudioState {
   dismissBanner: () => void;
 }
 
+function emptyEngineResources() {
+  return {
+    systemInfo: null,
+    diskUsage: [],
+    dockerContexts: [],
+    machines: [],
+    pods: [],
+    allContainers: [],
+    images: [],
+    networks: [],
+    volumes: [],
+    composeContainers: [],
+  };
+}
+
 export const useStudioStore = create<StudioState>((set) => ({
   activePage: 'compose',
   setActivePage: (activePage) => set({ activePage }),
@@ -404,6 +427,7 @@ export const useStudioStore = create<StudioState>((set) => ({
     set((state) => ({
       engine,
       settings: state.settings ? { ...state.settings, engine } : state.settings,
+      ...(state.engine !== engine ? emptyEngineResources() : {}),
     })),
 
   languageSetting: 'auto',
@@ -431,8 +455,11 @@ export const useStudioStore = create<StudioState>((set) => ({
   composeContainers: [],
   selectedDirectory: null,
   imageResults: [],
+  imageSearchError: null,
   operationInProgress: null,
   operationsInProgress: {},
+  operationLabels: {},
+  operationTokens: {},
 
   systemInfo: null,
   diskUsage: [],
@@ -458,32 +485,53 @@ export const useStudioStore = create<StudioState>((set) => ({
   setComposeContainers: (composeContainers) => set({ composeContainers }),
   setSelectedDirectory: (selectedDirectory) => set({ selectedDirectory }),
   setImageResults: (imageResults) => set({ imageResults }),
-  beginOperation: (op) =>
-    set((state) => ({
-      operationsInProgress: {
-        ...state.operationsInProgress,
-        [op]: (state.operationsInProgress[op] || 0) + 1,
-      },
-      operationInProgress: state.operationInProgress || op,
-    })),
-  endOperation: (op) =>
+  setImageSearchError: (imageSearchError) => set({ imageSearchError }),
+  beginOperation: (op, label, id) =>
     set((state) => {
+      if (id && state.operationTokens[id]) {
+        return state;
+      }
+      return {
+        operationsInProgress: {
+          ...state.operationsInProgress,
+          [op]: (state.operationsInProgress[op] || 0) + 1,
+        },
+        operationLabels: { ...state.operationLabels, [op]: label || op },
+        operationTokens: id
+          ? { ...state.operationTokens, [id]: { key: op, label: label || op } }
+          : state.operationTokens,
+        operationInProgress: state.operationInProgress || op,
+      };
+    }),
+  endOperation: (op, id) =>
+    set((state) => {
+      if (id && state.operationTokens[id]?.key !== op) {
+        return state;
+      }
       const operationsInProgress = { ...state.operationsInProgress };
+      const operationLabels = { ...state.operationLabels };
+      const operationTokens = { ...state.operationTokens };
+      if (id) {
+        delete operationTokens[id];
+      }
       if ((operationsInProgress[op] || 0) > 1) {
         operationsInProgress[op]--;
+        const remaining = Object.values(operationTokens).find((token) => token.key === op);
+        if (remaining) {
+          operationLabels[op] = remaining.label;
+        }
       } else {
         delete operationsInProgress[op];
+        delete operationLabels[op];
       }
       return {
         operationsInProgress,
+        operationLabels,
+        operationTokens,
         operationInProgress: Object.keys(operationsInProgress)[0] || null,
       };
     }),
-  setSystemInfo: (systemInfo) =>
-    set((state) => ({
-      systemInfo,
-      engine: systemInfo?.engine || state.engine,
-    })),
+  setSystemInfo: (systemInfo) => set({ systemInfo }),
   setDiskUsage: (diskUsage) => set({ diskUsage }),
   setDockerContexts: (dockerContexts) => set({ dockerContexts }),
   setMachines: (machines) => set({ machines }),
@@ -515,13 +563,16 @@ export const useStudioStore = create<StudioState>((set) => ({
         languageSetting: langSetting,
         vscodeLanguage: hostLang,
         resolvedLocale,
+        ...(state.engine !== nextEngine ? emptyEngineResources() : {}),
       };
     }),
   setSettingsTestResult: (settingsTestResult) => set({ settingsTestResult }),
   showBanner: (type, message) =>
-    set({
-      banner: { id: Date.now(), type, message },
-    }),
+    set((state) =>
+      state.banner?.type === 'error' && type !== 'error'
+        ? state
+        : { banner: { id: Date.now(), type, message } }
+    ),
   dismissBanner: () => set({ banner: null }),
 }));
 
@@ -530,7 +581,12 @@ export function useStudioMessageBridge(): void {
   const store = useStudioStore();
 
   useEffect(() => {
-    const unsubscribe = onMessage((msg) => {
+    const gate = createEngineMessageGate();
+    const handleMessage = (msg: StudioMessage) => {
+      const current = useStudioStore.getState();
+      if (!gate.shouldHandle(msg, current.engine, Boolean(current.settings))) {
+        return;
+      }
       const p = msg.payload;
       switch (msg.command) {
         case 'compose:update':
@@ -549,12 +605,22 @@ export function useStudioMessageBridge(): void {
           break;
         case 'compose:image:results':
           store.setImageResults(Array.isArray(p?.results) ? p.results : []);
+          store.setImageSearchError(typeof p?.error === 'string' ? p.error : null);
           break;
         case 'operation:start':
-          store.beginOperation(String(p || 'busy'));
+          if (p && typeof p === 'object' && typeof p.key === 'string') {
+            store.beginOperation(p.key, typeof p.label === 'string' ? p.label : undefined,
+              typeof p.id === 'string' ? p.id : undefined);
+          } else {
+            store.beginOperation(String(p || 'busy'));
+          }
           break;
         case 'operation:end':
-          store.endOperation(String(p || 'busy'));
+          if (p && typeof p === 'object' && typeof p.key === 'string') {
+            store.endOperation(p.key, typeof p.id === 'string' ? p.id : undefined);
+          } else {
+            store.endOperation(String(p || 'busy'));
+          }
           break;
         case 'notification':
           if (p?.message) {
@@ -616,6 +682,9 @@ export function useStudioMessageBridge(): void {
         case 'settings:update':
           if (p) {
             store.setSettings(p);
+            for (const queued of gate.drain(useStudioStore.getState().engine)) {
+              handleMessage(queued);
+            }
           }
           break;
         case 'settings:test:result':
@@ -627,7 +696,8 @@ export function useStudioMessageBridge(): void {
           }
           break;
       }
-    });
+    };
+    const unsubscribe = onMessage(handleMessage);
 
     postMessage('dashboard:get');
     postMessage('settings:get');

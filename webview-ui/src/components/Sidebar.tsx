@@ -1,7 +1,6 @@
 import React from 'react';
 import {
   Box,
-  Boxes,
   Database,
   FileCode2,
   Globe,
@@ -35,13 +34,13 @@ export const Sidebar: React.FC = () => {
   const {
     activePage,
     setActivePage,
-    pods,
     allContainers,
     images,
     volumes,
     networks,
     machines,
     systemInfo,
+    settings,
   } = useStudioStore();
 
   const defaultMachine = machines[0];
@@ -57,8 +56,6 @@ export const Sidebar: React.FC = () => {
     (c) => !c.isInfra && c.state === 'running'
   ).length;
   const nonInfraContainersCount = allContainers.filter((c) => !c.isInfra).length;
-
-  const isPodman = engine === 'podman';
 
   const sections: Array<{ title: string; items: NavItem[] }> = [
     {
@@ -87,12 +84,6 @@ export const Sidebar: React.FC = () => {
             nonInfraContainersCount > 0
               ? `${runningContainersCount}/${nonInfraContainersCount}`
               : undefined,
-        },
-        {
-          id: 'pods',
-          label: t.sidebar.pods,
-          icon: <Boxes className="w-4 h-4 stroke-[1.6]" />,
-          badge: isPodman ? pods.length || undefined : undefined,
         },
         {
           id: 'images',
@@ -232,7 +223,9 @@ export const Sidebar: React.FC = () => {
 
       {/* Footer with Quick 16-Language Switcher */}
       <div className="px-3.5 py-2.5 border-t border-panel-border text-[11px] text-text-muted flex items-center justify-between gap-2">
-        <span className="truncate font-mono text-[10px]">v1.0.0 · {engineLabel}</span>
+        <span className="truncate font-mono text-[10px]">
+          {settings?.extensionVersion ? `v${settings.extensionVersion} · ` : ''}{engineLabel}
+        </span>
         <div
           className="flex items-center gap-1.5 bg-white/[0.03] border border-panel-border rounded-md px-2 py-0.5"
           title={t.sidebar.languageTooltip}

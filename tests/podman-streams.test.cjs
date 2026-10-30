@@ -1,5 +1,7 @@
 const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const {
@@ -31,6 +33,19 @@ function deferred() {
 }
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+function composeFiles(t, names = ['compose.yaml']) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-status-'));
+  const files = names.map((name) => path.join(dir, name));
+  for (const file of files) fs.writeFileSync(file, 'services: {}\n');
+  t.after(() => {
+    for (const file of files) {
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+    }
+    fs.rmdirSync(dir);
+  });
+  return files;
+}
 
 test.beforeEach(() => {
   Object.assign(config, {
@@ -155,6 +170,7 @@ test('removes Compose ANSI colors before parsing log prefixes', (t) => {
 });
 
 test('switching Compose files starts a new poll and ignores stale responses', async (t) => {
+  const [oldFile, newFile] = composeFiles(t, ['old.yaml', 'new.yaml']);
   const first = deferred();
   const second = deferred();
   const calls = [];
@@ -166,8 +182,6 @@ test('switching Compose files starts a new poll and ignores stale responses', as
   };
   const provider = new StatusProvider(podman, { parse: () => ({}) });
   t.after(() => provider.dispose());
-  const oldFile = path.resolve('not-present-old.yaml');
-  const newFile = path.resolve('not-present-new.yaml');
   provider.startPolling(oldFile, 60_000);
   provider.startPolling(newFile, 60_000);
   assert.deepEqual(calls, [oldFile, newFile]);
@@ -178,7 +192,31 @@ test('switching Compose files starts a new poll and ignores stale responses', as
   assert.deepEqual(provider.getContainers(), [{ service: 'new', status: 'running' }]);
 });
 
+test('switching engines clears Compose statuses before the new poll completes', async (t) => {
+  const [file] = composeFiles(t);
+  const second = deferred();
+  let calls = 0;
+  const provider = new StatusProvider({
+    composePs: () => ++calls === 1
+      ? Promise.resolve([{ service: 'old', status: 'running' }])
+      : second.promise,
+  }, { parse: () => ({}) });
+  t.after(() => provider.dispose());
+  const events = [];
+  provider.onStatusChange((statuses) => events.push(statuses));
+  provider.startPolling(file, 60_000);
+  await tick();
+  assert.equal(provider.getContainers().length, 1);
+  config.engine = 'docker';
+  provider.startPolling(file, 60_000);
+  assert.deepEqual(provider.getContainers(), []);
+  assert.deepEqual(events.at(-1), []);
+  second.resolve([]);
+  await tick();
+});
+
 test('deduplicates polling errors until a successful refresh', async (t) => {
+  const [file] = composeFiles(t);
   let failing = true;
   const provider = new StatusProvider({
     composePs: async () => {
@@ -189,7 +227,7 @@ test('deduplicates polling errors until a successful refresh', async (t) => {
   t.after(() => provider.dispose());
   const errors = [];
   provider.onError((message) => errors.push(message));
-  provider.startPolling(path.resolve('not-present.yaml'), 60_000);
+  provider.startPolling(file, 60_000);
   await tick();
   await provider.poll();
   assert.deepEqual(errors, ['Podman unavailable']);
@@ -198,6 +236,60 @@ test('deduplicates polling errors until a successful refresh', async (t) => {
   failing = true;
   await provider.poll();
   assert.deepEqual(errors, ['Podman unavailable', 'Podman unavailable']);
+});
+
+test('a removed Compose file clears stale status, reports the file and recovers', async (t) => {
+  const [file] = composeFiles(t);
+  const pending = deferred();
+  let calls = 0;
+  const provider = new StatusProvider({
+    composePs: () => ++calls === 2
+      ? pending.promise
+      : Promise.resolve([{ service: 'app', status: 'running' }]),
+  }, { parse: () => ({}) });
+  t.after(() => provider.dispose());
+  const errors = [];
+  const events = [];
+  provider.onError((message) => errors.push(message));
+  provider.onStatusChange((statuses) => events.push(statuses));
+  provider.startPolling(file, 60_000);
+  await tick();
+  assert.equal(provider.getContainers().length, 1);
+
+  const polling = provider.poll();
+  fs.unlinkSync(file);
+  pending.resolve([{ service: 'stale', status: 'running' }]);
+  await polling;
+  assert.deepEqual(provider.getContainers(), []);
+  assert.deepEqual(events.at(-1), []);
+  assert.deepEqual(errors, [`Compose file is unavailable: ${file}`]);
+
+  await provider.poll();
+  assert.equal(calls, 2);
+  assert.equal(errors.length, 1);
+  fs.writeFileSync(file, 'services: {}\n');
+  await provider.poll();
+  assert.deepEqual(provider.getContainers(), [{ service: 'app', status: 'running' }]);
+});
+
+test('clearing the active Compose file invalidates an in-flight poll', async (t) => {
+  const [file] = composeFiles(t);
+  const pending = deferred();
+  let calls = 0;
+  const provider = new StatusProvider({
+    composePs: () => ++calls === 1
+      ? Promise.resolve([{ service: 'app', status: 'running' }])
+      : pending.promise,
+  }, { parse: () => ({}) });
+  t.after(() => provider.dispose());
+  provider.startPolling(file, 60_000);
+  await tick();
+  const polling = provider.poll();
+  provider.clearActiveFile();
+  assert.deepEqual(provider.getContainers(), []);
+  pending.resolve([{ service: 'stale', status: 'running' }]);
+  await polling;
+  assert.deepEqual(provider.getContainers(), []);
 });
 
 test('native Compose down confirms deletion and marks a failed command as failed', async (t) => {

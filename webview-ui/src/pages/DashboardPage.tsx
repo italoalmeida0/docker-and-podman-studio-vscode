@@ -132,7 +132,7 @@ export const DashboardPage: React.FC = () => {
             />
           </div>
           {isPodman ? (
-            <div onClick={() => setActivePage('pods')} className="cursor-pointer">
+            <div onClick={() => setActivePage('containers')} className="cursor-pointer">
               <StatCard
                 label={t.dashboard.podsCard}
                 value={pods.length}
@@ -475,6 +475,11 @@ export const DashboardPage: React.FC = () => {
                   label={t.dashboard.orphanVolumesBtn}
                   disabled={busy}
                   onClick={() => postMessage('prune:volumes')}
+                />
+                <SmallActionButton
+                  label={`${t.sidebar.networks}: ${t.images.filterUnused}`}
+                  disabled={busy}
+                  onClick={() => postMessage('prune:networks')}
                 />
               </div>
             </div>

@@ -45,9 +45,7 @@ Inspect live daemon telemetry, switch between local and remote **Docker Contexts
 ![Unified Dashboard and Docker Contexts](resources/screenshots/02-dual-engine-dashboard.png)
 
 ### 2. One-Click Podman Mode & Kubernetes-Style Pods
-Switch to **Podman** anytime to unlock daemonless rootless container management, **Podman Machine** VM lifecycle controls, and native **Kubernetes-style Pods** with shared network/IPC namespaces.
-
-![Podman Native Mode and Kubernetes-Style Pods](resources/screenshots/03-podman-pods.png)
+Switch to **Podman** anytime to unlock daemonless rootless container management, **Podman Machine** VM lifecycle controls, and native **Kubernetes-style Pods** with shared network/IPC namespaces. Pods and their member containers appear together in the Containers tree.
 
 ### 3. Real-Time Multi-Service Log Streaming
 Debug distributed stacks effortlessly with color-coded log levels, per-service filter pills, instant text search, pause/resume controls, or 1-click routing to the VS Code Output Channel and integrated Terminal.
@@ -86,13 +84,16 @@ Switch between **Docker** and **Podman** or choose from **16 built-in languages*
 - **YAML IntelliSense & Diagnostics**: Real-time autocompletion and schema diagnostics for Compose files directly inside the VS Code editor.
 - **Podman Service Scaling**: In the **Services** tab, choose **Scale** and explicitly enter a service's desired replica count, including zero. Scaling above zero runs Compose up and can start dependencies or recreate containers. Scaling down removes excess containers and their writable layers, retains volumes, and asks for confirmation unless deletion confirmations are disabled.
 - **Replica-Aware Podman Actions**: Start, stop, restart, and logs include runtime-scaled replicas even when `podman-compose` only expands the counts declared in YAML. Down verifies container removal and safely cleans up leftover replicas, retaining volumes unless explicitly requested and preserving orphan services unless `removeOrphans` is enabled.
+- **Selected Services**: Select multiple services to start, stop, restart, build, or remove their containers. Starting or building can also start dependencies or recreate containers. Removing services leaves their Compose definitions and volumes intact, and requires confirmation.
 
 ### Container, Pod & Infrastructure Management
 - **Simple & Advanced Containers**: Launch standalone or Pod-attached containers with port mappings, volume mounts, environment variables, CPU/Memory limits, and custom `--mount` specs. Open an **Interactive Terminal** (`exec -it`) in one click.
+- **Container Tree**: The Containers view groups Podman containers under their pods, including empty pods, and groups other Compose containers by project in either engine. Expand a pod to inspect and manage its members; Podman pod creation, lifecycle actions, and logs remain available there.
 - **Kubernetes-Style Pods *(Podman Mode)***: Create Pods with custom `--hostname`, published ports, `--network`, `--add-host`, `--cpu-shares`, and labels; inspect member & infra containers; stream Pod logs; and manage Pod lifecycles.
 - **Podman Batch Controls**: Select visible containers or pods to start, stop, or restart eligible resources together. Failures are reported per resource. Individual containers and pods can also be paused and resumed; Podman infra containers are protected from individual lifecycle and delete actions.
+- **Resource Selection and Cleanup**: Select images or unused volumes and networks for removal. Cleanup identifies candidates explicitly, including named unused volumes, and asks for confirmation with their names; deleting volumes permanently removes their data. Stopped containers count as references. Default networks and Docker non-local networks are protected, and resources are checked again before removal without force.
 - **OCI Images, Builds & Prune Suite**: Pull images, build from `Dockerfile` or `Containerfile`, push to remote registries, and reclaim disk space (`Prune Dangling`, `Prune All Unused`, `Clear Builder Cache`).
-- **Volumes & Networks**: Create, inspect (drivers, subnets, gateways, DNS, IPv6), prune, and delete volumes and networks.
+- **Progress & Errors**: Long-running Studio operations show progress. Failures remain visible until dismissed and details are available in the **Docker and Podman Studio** output channel.
 - **Encrypted Registry Authentication**: Store private registry credentials securely in **VS Code `SecretStorage`** (never written in plaintext to `settings.json`) with optional automatic `docker login` / `podman login`.
 
 In Podman mode, image, volume, and network removal does not force-remove resources in use. Podman build-cache cleanup uses `podman image prune --build-cache` when supported; it also removes dangling images. Do not run it during a build.

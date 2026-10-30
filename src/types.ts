@@ -102,6 +102,7 @@ export interface PodmanVolume {
   anonymous: boolean;
   composeProject: string;
   labels: Record<string, string>;
+  usage: 'unused' | 'inUse';
 }
 
 export interface PodmanSubnet {
@@ -111,6 +112,7 @@ export interface PodmanSubnet {
 
 export interface PodmanNetwork {
   id: string;
+  fullId: string;
   name: string;
   driver: string;
   networkInterface: string;
@@ -120,6 +122,8 @@ export interface PodmanNetwork {
   internal: boolean;
   ipv6Enabled: boolean;
   composeProject: string;
+  usage: 'unused' | 'inUse';
+  protected: boolean;
 }
 
 export interface PodmanMachine {
@@ -210,6 +214,13 @@ export interface PodmanBatchItemResult {
   result: CommandResult;
 }
 
+export type RemovableResource = 'image' | 'volume' | 'network';
+
+export interface ResourceRemovalTarget {
+  name: string;
+  identity: string;
+}
+
 export interface CreatePodOptions {
   name?: string;
   hostname?: string;
@@ -286,6 +297,8 @@ export const InboundCommand = {
   PRUNE_ALL_IMAGES: 'prune:all:images',
   PRUNE_BUILDER_CACHE: 'prune:builder',
   PRUNE_VOLUMES: 'prune:volumes',
+  PRUNE_NETWORKS: 'prune:networks',
+  RESOURCE_REMOVE_BATCH: 'resource:remove:batch',
 
   // Networks
   NETWORKS_LIST: 'networks:list',
@@ -305,6 +318,7 @@ export const InboundCommand = {
   STACK_RESTART: 'stack:restart',
   STACK_BUILD: 'stack:build',
   STACK_SCALE: 'stack:scale',
+  STACK_SERVICES_BATCH: 'stack:services:batch',
   LOGS_START: 'logs:start',
   LOGS_STOP: 'logs:stop',
   SERVICE_ADD: 'service:add',
@@ -334,6 +348,7 @@ export const InboundCommand = {
   SETTINGS_RESET_PATHS: 'settings:resetPaths',
   OPEN_EXTERNAL: 'external:open',
   OPEN_VSCODE_SETTINGS: 'vscode:settings:open',
+  OUTPUT_SHOW: 'output:show',
 } as const;
 
 export const OutboundCommand = {

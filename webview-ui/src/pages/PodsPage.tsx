@@ -1,14 +1,11 @@
 import React, { useMemo, useState } from 'react';
 import {
-  Boxes,
   ChevronDown,
   FileText,
   Pause,
   Play,
   Plus,
-  RefreshCw,
   RotateCcw,
-  Search,
   Square,
   Trash2,
 } from 'lucide-react';
@@ -21,19 +18,22 @@ import {
 import {
   ActionPillButton,
   DetailRow,
-  EmptyState,
   Modal,
   SmallActionButton,
-  StatCard,
   StatusBadge,
 } from '../components/Shared';
 import { useI18n } from '../i18n';
 import { PodmanPod, useStudioStore } from '../store';
 import { useVsCodeMessaging } from '../vscode';
 
-export const PodsPage: React.FC = () => {
+export const PodGroups: React.FC<{
+  visiblePods: PodmanPod[];
+  expandedPods: Record<string, boolean>;
+  onTogglePod: (id: string) => void;
+  renderContainers: (pod: PodmanPod) => React.ReactNode;
+}> = ({ visiblePods, expandedPods, onTogglePod, renderContainers }) => {
   const { postMessage } = useVsCodeMessaging();
-  const { t, fmt, engine, changeEngine } = useI18n();
+  const { t, fmt } = useI18n();
   const {
     pods,
     networks,
@@ -44,9 +44,6 @@ export const PodsPage: React.FC = () => {
     clearLogs,
   } = useStudioStore();
 
-  const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'running' | 'stopped'>('all');
-  const [expandedPods, setExpandedPods] = useState<Record<string, boolean>>({});
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [logModalPod, setLogModalPod] = useState<PodmanPod | null>(null);
   const [confirmDeletePod, setConfirmDeletePod] = useState<PodmanPod | null>(null);
@@ -62,36 +59,12 @@ export const PodsPage: React.FC = () => {
 
   const busy = Boolean(operationInProgress);
 
-  const filteredPods = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return pods.filter((pod) => {
-      if (statusFilter === 'running' && !isRunningState(pod.state)) {
-        return false;
-      }
-      if (statusFilter === 'stopped' && (isRunningState(pod.state) || pod.state === 'paused')) {
-        return false;
-      }
-      if (!q) {
-        return true;
-      }
-      return (
-        pod.name.toLowerCase().includes(q) ||
-        pod.id.toLowerCase().includes(q) ||
-        pod.networks.some((n) => n.toLowerCase().includes(q)) ||
-        pod.containers.some((c) => c.name.toLowerCase().includes(q))
-      );
-    });
-  }, [pods, search, statusFilter]);
-
   const selectable = useMemo(() => pods.filter((pod) => Boolean(pod.fullId)), [pods]);
   const visibleSelectable = useMemo(
-    () => filteredPods.filter((pod) => Boolean(pod.fullId)),
-    [filteredPods]
+    () => visiblePods.filter((pod) => Boolean(pod.fullId)),
+    [visiblePods]
   );
-  const selection = usePodmanSelection(selectable, visibleSelectable, engine === 'podman');
-  const runningCount = pods.filter((p) => isRunningState(p.state)).length;
-  const stoppedCount = pods.filter((p) => p.state === 'stopped' || p.state === 'exited').length;
-  const totalPodContainers = pods.reduce((acc, p) => acc + p.containers.length, 0);
+  const selection = usePodmanSelection(selectable, visibleSelectable, true);
 
   const handleCreatePod = () => {
     const splitCsvOrLines = (raw: string) =>
@@ -119,149 +92,29 @@ export const PodsPage: React.FC = () => {
     setLabelsText('');
   };
 
-  if (engine === 'docker') {
-    return (
-      <div className="flex flex-col h-full">
-        <div className="px-6 py-4 border-b border-panel-border bg-panel-card flex items-center justify-between gap-4 flex-wrap">
-          <div>
-            <h1 className="text-lg font-semibold text-text-primary flex items-center gap-2">
-              <Boxes className="w-5 h-5 text-accent-blue" />
-              <span>{t.pods.title}</span>
-            </h1>
-            <p className="text-xs text-text-secondary mt-0.5">{t.pods.subtitle}</p>
-          </div>
-        </div>
-
-        <div className="flex-1 overflow-auto p-6 flex items-center justify-center">
-          <div className="max-w-xl w-full">
-            <EmptyState
-              icon={<Boxes className="w-10 h-10 text-accent-purple" />}
-              title={t.pods.dockerModeTitle}
-              description={t.pods.dockerModeDesc}
-              action={
-                <ActionPillButton
-                  label={t.pods.switchToPodmanBtn}
-                  variant="brand"
-                  icon={<Boxes className="w-3.5 h-3.5" />}
-                  onClick={() => changeEngine('podman')}
-                />
-              }
-            />
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="flex flex-col h-full">
-      {/* Header */}
-      <div className="px-6 py-4 border-b border-panel-border bg-panel-card flex items-center justify-between gap-4 flex-wrap">
-        <div>
-          <h1 className="text-[17px] font-semibold tracking-tight text-text-primary">
-            {t.pods.title}
-          </h1>
-          <p className="text-xs text-text-secondary mt-0.5">{t.pods.subtitle}</p>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <ActionPillButton
-            label={t.pods.createPodBtn}
-            variant="podman"
-            icon={<Plus className="w-3.5 h-3.5" />}
-            onClick={() => setShowCreateModal(true)}
-          />
-          <ActionPillButton
-            label={t.common.refresh}
-            loading={busy}
-            icon={<RefreshCw className="w-3.5 h-3.5" />}
-            onClick={() => postMessage('pods:list')}
-          />
-        </div>
+    <>
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-sm font-semibold text-text-primary">{t.pods.title}</h2>
+        <ActionPillButton
+          label={t.pods.createPodBtn}
+          variant="podman"
+          disabled={busy}
+          icon={<Plus className="w-3.5 h-3.5" />}
+          onClick={() => setShowCreateModal(true)}
+        />
       </div>
 
-      {/* Main Content */}
-      <div className="flex-1 overflow-auto p-6 space-y-5">
-        <div className="grid grid-cols-3 gap-3">
-          <StatCard
-            label={t.pods.totalPods}
-            value={pods.length}
-            detail={fmt(t.pods.runningDetail, { count: runningCount })}
-            accent={runningCount > 0 ? 'border-accent-purple' : 'border-panel-border'}
-          />
-          <StatCard
-            label={t.pods.stoppedPods}
-            value={stoppedCount}
-            detail={t.pods.readyToStart}
-          />
-          <StatCard
-            label={t.pods.containersInPods}
-            value={totalPodContainers}
-            detail={t.pods.includingInfra}
-          />
-        </div>
+      <PodmanBatchActions
+        selection={selection}
+        busy={busy}
+        onAction={(action, ids) => postMessage('pod:batch', { action, ids })}
+      />
 
-        {/* Search & Filter Toolbar */}
-        <div className="flex items-center justify-between gap-3 flex-wrap">
-          <div className="relative flex-1 min-w-[240px]">
-            <Search className="w-4 h-4 text-text-muted absolute left-3 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder={t.pods.searchPlaceholder}
-              className="input-field pl-9"
-            />
-          </div>
-          <div className="flex items-center gap-1.5 bg-panel-card border border-panel-border rounded-md p-1">
-            {(
-              [
-                ['all', t.common.all],
-                ['running', t.pods.filterRunning],
-                ['stopped', t.pods.filterStopped],
-              ] as const
-            ).map(([id, label]) => (
-              <button
-                key={id}
-                type="button"
-                onClick={() => setStatusFilter(id)}
-                className={`px-3 py-1 text-xs rounded-md transition-colors border ${
-                  statusFilter === id
-                    ? 'bg-white/[0.11] text-text-primary border-white/[0.12] font-medium shadow-sm'
-                    : 'border-transparent text-text-secondary hover:text-text-primary'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <PodmanBatchActions
-          selection={selection}
-          busy={busy}
-          onAction={(action, ids) => postMessage('pod:batch', { action, ids })}
-        />
-
-        {/* Pods List */}
-        {filteredPods.length === 0 ? (
-          <EmptyState
-            icon={<Boxes className="w-8 h-8" />}
-            title={pods.length === 0 ? t.pods.emptyNoPods : t.pods.emptyNoMatch}
-            description={t.pods.emptyDesc}
-            action={
-              <ActionPillButton
-                label={t.pods.createNewPodBtn}
-                variant="podman"
-                icon={<Plus className="w-3.5 h-3.5" />}
-                onClick={() => setShowCreateModal(true)}
-              />
-            }
-          />
-        ) : (
-          <div className="space-y-3">
-            {filteredPods.map((pod) => {
-              const expanded = Boolean(expandedPods[pod.id]);
+      <div className="space-y-3">
+            {visiblePods.map((pod) => {
+              const podKey = pod.fullId || pod.id;
+              const expanded = expandedPods[podKey] !== false;
               const isRunning = isRunningState(pod.state);
               const isPaused = pod.state === 'paused';
               return (
@@ -281,9 +134,7 @@ export const PodsPage: React.FC = () => {
                     )}
                     <div
                       className="flex items-center gap-3 min-w-0 flex-1 cursor-pointer"
-                      onClick={() =>
-                        setExpandedPods((prev) => ({ ...prev, [pod.id]: !prev[pod.id] }))
-                      }
+                      onClick={() => onTogglePod(podKey)}
                     >
                       <StatusBadge status={pod.state} />
                       <div className="min-w-0">
@@ -351,9 +202,9 @@ export const PodsPage: React.FC = () => {
                       />
                       <button
                         type="button"
-                        onClick={() =>
-                          setExpandedPods((prev) => ({ ...prev, [pod.id]: !prev[pod.id] }))
-                        }
+                        aria-label={pod.name}
+                        aria-expanded={expanded}
+                        onClick={() => onTogglePod(podKey)}
                         className="p-1.5 rounded border border-panel-border text-text-secondary hover:text-text-primary"
                       >
                         <ChevronDown
@@ -376,24 +227,8 @@ export const PodsPage: React.FC = () => {
                         <div className="text-[11px] uppercase tracking-wider text-text-secondary mb-2">
                           {fmt(t.pods.memberContainers, { count: pod.containers.length })}
                         </div>
-                        <div className="grid grid-cols-2 gap-2">
-                          {pod.containers.map((c) => (
-                            <div
-                              key={c.id}
-                              className="bg-panel-card border border-panel-border rounded px-3 py-2 flex items-center justify-between gap-2 text-xs"
-                            >
-                              <div className="min-w-0">
-                                <div className="font-medium text-text-primary truncate">{c.name}</div>
-                                <div className="font-mono text-[11px] text-text-muted">
-                                  {c.id.slice(0, 12)} · {t.pods.restarts}: {c.restartCount}
-                                </div>
-                              </div>
-                              <StatusBadge
-                                status={c.status.toLowerCase().includes('run') ? 'running' : 'stopped'}
-                                customLabel={c.status}
-                              />
-                            </div>
-                          ))}
+                        <div className="space-y-2 border-l-2 border-panel-border pl-4">
+                          {renderContainers(pod)}
                         </div>
                       </div>
                     </div>
@@ -402,8 +237,6 @@ export const PodsPage: React.FC = () => {
               );
             })}
           </div>
-        )}
-      </div>
 
       {/* Create Pod Modal */}
       {showCreateModal && (
@@ -584,6 +417,6 @@ export const PodsPage: React.FC = () => {
           </p>
         </Modal>
       )}
-    </div>
+    </>
   );
 };

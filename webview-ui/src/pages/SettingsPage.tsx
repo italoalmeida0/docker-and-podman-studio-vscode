@@ -57,7 +57,7 @@ export const SettingsPage: React.FC = () => {
     engineCmd,
     changeEngine,
   } = useI18n();
-  const { settings, settingsTestResult, setSettingsTestResult } = useStudioStore();
+  const { settings, settingsTestResult, setSettingsTestResult, operationsInProgress } = useStudioStore();
 
   const [form, setForm] = useState<StudioSettings>(settings || DEFAULT_SETTINGS);
   const [registrySecret, setRegistrySecret] = useState('');
@@ -535,7 +535,11 @@ export const SettingsPage: React.FC = () => {
             </label>
 
             <div className="flex items-center gap-2">
-              <ActionPillButton label={t.settings.testConnectionBtn} onClick={handleTestRegistry} />
+              <ActionPillButton
+                label={t.settings.testConnectionBtn}
+                loading={Boolean(operationsInProgress['registry-test'])}
+                onClick={handleTestRegistry}
+              />
               {form.hasRegistrySecret && (
                 <ActionPillButton
                   label={t.settings.disconnectRegistryBtn}

@@ -89,6 +89,8 @@ export class StudioWebviewPanel implements vscode.Disposable {
   private panel: vscode.WebviewPanel | undefined;
   private readonly _onMessage = new vscode.EventEmitter<any>();
   public readonly onMessage = this._onMessage.event;
+  private readonly _onDidClose = new vscode.EventEmitter<void>();
+  public readonly onDidClose = this._onDidClose.event;
   private readonly disposables: vscode.Disposable[] = [];
 
   constructor(private readonly extensionUri: vscode.Uri) {}
@@ -135,6 +137,7 @@ export class StudioWebviewPanel implements vscode.Disposable {
     this.panel.onDidDispose(
       () => {
         this.panel = undefined;
+        this._onDidClose.fire();
       },
       undefined,
       this.disposables
@@ -176,6 +179,7 @@ export class StudioWebviewPanel implements vscode.Disposable {
   public dispose(): void {
     this.panel?.dispose();
     this._onMessage.dispose();
+    this._onDidClose.dispose();
     for (const d of this.disposables) {
       d.dispose();
     }

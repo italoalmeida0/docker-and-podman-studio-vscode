@@ -94,6 +94,12 @@ export const ToolsPage: React.FC = () => {
                 icon={<Trash2 className="w-3.5 h-3.5" />}
                 onClick={() => postMessage('prune:volumes')}
               />
+              <ActionPillButton
+                label={`${t.sidebar.networks}: ${t.images.filterUnused}`}
+                disabled={busy}
+                icon={<Trash2 className="w-3.5 h-3.5" />}
+                onClick={() => postMessage('prune:networks')}
+              />
             </div>
           </div>
 

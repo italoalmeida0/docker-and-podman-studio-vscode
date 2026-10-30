@@ -31,6 +31,8 @@ import {
   InboundCommand as M,
   OutboundCommand as A,
   PodmanBatchResource,
+  RemovableResource,
+  ResourceRemovalTarget,
   ServiceStatus,
 } from './types';
 import { showErrorWithCopy } from './ui/messageUtil';
@@ -68,6 +70,20 @@ function defaultHostForProvider(provider: string, customUrl: string): string {
   }
 }
 
+export function resolveRegistrySearch(
+  selection: string | undefined,
+  customUrl: string | undefined,
+  configured: { registryProvider: string; registryUrl: string }
+): { provider: string; registryUrl: string } {
+  const explicitProvider = selection && selection !== 'configured' ? selection : undefined;
+  return {
+    provider: explicitProvider || configured.registryProvider,
+    registryUrl: selection === 'custom'
+      ? String(customUrl || '')
+      : explicitProvider ? '' : configured.registryUrl || '',
+  };
+}
+
 export async function disconnectRegistryCredentials(
   podman: Pick<PodmanService, 'logoutRegistry'>,
   secrets: Pick<vscode.SecretStorage, 'delete'>,
@@ -84,37 +100,54 @@ export async function disconnectRegistryCredentials(
   await secrets.delete(SECRET_KEY);
 }
 
-function httpGetJson(url: string, headers: Record<string, string> = {}): Promise<any> {
+export function httpGetJson(
+  url: string,
+  headers: Record<string, string> = {},
+  signal?: AbortSignal,
+  timeoutMs = 20_000
+): Promise<any> {
   return new Promise((resolve, reject) => {
-    https
-      .get(
-        url,
-        {
-          headers: {
-            Accept: 'application/json',
-            'User-Agent': 'Docker-and-Podman-Studio-VSCode',
-            ...headers,
-          },
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const rejectRequest = (error: unknown) => {
+      if (deadline) clearTimeout(deadline);
+      reject(error);
+    };
+    const request = https.get(
+      url,
+      {
+        timeout: timeoutMs,
+        signal,
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': 'Docker-and-Podman-Studio-VSCode',
+          ...headers,
         },
-        (res) => {
-          let body = '';
-          res.on('data', (chunk) => {
-            body += chunk;
-          });
-          res.on('end', () => {
-            if ((res.statusCode ?? 500) >= 400) {
-              reject(new Error(`Registry HTTP ${res.statusCode}`));
-              return;
-            }
-            try {
-              resolve(JSON.parse(body));
-            } catch (e) {
-              reject(e);
-            }
-          });
-        }
-      )
-      .on('error', reject);
+      },
+      (res) => {
+        let body = '';
+        res.on('data', (chunk) => {
+          body += chunk;
+        });
+        res.on('error', rejectRequest);
+        res.on('aborted', () => rejectRequest(new Error('Registry response was interrupted.')));
+        res.on('end', () => {
+          if (deadline) clearTimeout(deadline);
+          if ((res.statusCode ?? 500) >= 400) {
+            reject(new Error(`Registry HTTP ${res.statusCode}`));
+            return;
+          }
+          try {
+            resolve(JSON.parse(body));
+          } catch {
+            reject(new Error('Registry returned invalid JSON.'));
+          }
+        });
+      }
+    );
+    const timeout = () => request.destroy(new Error(`Registry request timed out after ${timeoutMs / 1000} seconds.`));
+    deadline = setTimeout(timeout, timeoutMs);
+    request.on('timeout', timeout);
+    request.on('error', rejectRequest);
   });
 }
 
@@ -184,12 +217,52 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   let activeComposeFile: string | undefined;
   let refreshGeneration = 0;
+  let imageSearchGeneration = 0;
+  let imageSearchController: AbortController | undefined;
   let lastRefreshError = '';
+  let nextOperationId = 0;
+  const listGenerations = new Map<string, number>();
+
+  function cancelImageSearch(): number {
+    imageSearchGeneration++;
+    imageSearchController?.abort();
+    imageSearchController = undefined;
+    return imageSearchGeneration;
+  }
+  context.subscriptions.push(studioPanel.onDidClose(() => cancelImageSearch()));
+
+  function nextListGeneration(command: string): number {
+    const generation = (listGenerations.get(command) || 0) + 1;
+    listGenerations.set(command, generation);
+    return generation;
+  }
+
+  function engineContextKey(): string {
+    const current = getConfig();
+    return JSON.stringify([
+      current.engine,
+      current.engine === 'podman' ? current.podmanPath : current.dockerPath,
+    ]);
+  }
 
   function reportError(error: unknown): void {
     const message = error instanceof Error ? error.message : String(error);
     output.appendLine(`[${new Date().toISOString()}] ${message}`);
     studioPanel.postMessage({ command: A.ERROR, payload: { message } });
+  }
+
+  async function withStudioProgress<T>(
+    key: string,
+    label: string,
+    task: () => Promise<T>
+  ): Promise<T> {
+    const id = String(++nextOperationId);
+    studioPanel.postMessage({ command: A.OPERATION_START, payload: { id, key, label } });
+    try {
+      return await task();
+    } finally {
+      studioPanel.postMessage({ command: A.OPERATION_END, payload: { id, key } });
+    }
   }
 
   const cfg = getConfig();
@@ -213,7 +286,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   function getActiveComposeFile(): string | undefined {
     if (!activeComposeFile || !fs.existsSync(activeComposeFile)) {
+      const previous = activeComposeFile;
       activeComposeFile = fileDetector.getFiles()[0];
+      if (activeComposeFile !== previous) {
+        if (activeComposeFile) {
+          statusProvider.startPolling(activeComposeFile, getConfig().pollingInterval);
+        } else {
+          statusProvider.clearActiveFile();
+        }
+      }
     }
     return activeComposeFile;
   }
@@ -268,13 +349,32 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
 
   async function refreshAllStudioData(selectedCompose?: string): Promise<void> {
+    return withStudioProgress('refresh-all', bt('refreshingStudio'), () =>
+      refreshStudioData(selectedCompose)
+    );
+  }
+
+  async function refreshStudioData(selectedCompose?: string): Promise<void> {
     const currentCfg = getConfig();
+    const initialContext = engineContextKey();
     const generation = ++refreshGeneration;
     if (selectedCompose && fs.existsSync(selectedCompose)) {
       activeComposeFile = selectedCompose;
       statusProvider.startPolling(selectedCompose, currentCfg.pollingInterval);
     }
 
+    const commands = [
+      A.SYSTEM_INFO_UPDATE,
+      A.DOCKER_CONTEXTS_UPDATE,
+      A.MACHINES_UPDATE,
+      A.PODS_UPDATE,
+      A.ALL_CONTAINERS_UPDATE,
+      A.IMAGES_UPDATE,
+      A.NETWORKS_UPDATE,
+      A.VOLUMES_UPDATE,
+      A.DISK_USAGE_UPDATE,
+    ];
+    const listVersions = commands.map(nextListGeneration);
     const containers = podman.listAllContainers();
     const results = await Promise.allSettled([
       podman.getSystemInfo(),
@@ -287,7 +387,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       podman.listVolumes(),
       podman.getDiskUsage(),
     ] as const);
-    if (generation !== refreshGeneration || getConfig().engine !== currentCfg.engine) {
+    if (generation !== refreshGeneration || engineContextKey() !== initialContext) {
       return;
     }
     const [sysInfo] = results;
@@ -296,32 +396,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     );
 
     if (studioPanel.isVisible()) {
-      const commands = [
-        A.SYSTEM_INFO_UPDATE,
-        A.DOCKER_CONTEXTS_UPDATE,
-        A.MACHINES_UPDATE,
-        A.PODS_UPDATE,
-        A.ALL_CONTAINERS_UPDATE,
-        A.IMAGES_UPDATE,
-        A.NETWORKS_UPDATE,
-        A.VOLUMES_UPDATE,
-        A.DISK_USAGE_UPDATE,
-      ];
       results.forEach((result, index) => {
+        if (listGenerations.get(commands[index]) !== listVersions[index]) return;
         if (result.status === 'fulfilled') {
-          studioPanel.postMessage({ command: commands[index], payload: result.value });
-        } else if (index === 0) {
-          studioPanel.postMessage({ command: A.SYSTEM_INFO_UPDATE, payload: null });
+          studioPanel.postMessage({ command: commands[index], payload: result.value, engine: currentCfg.engine });
+        } else {
+          studioPanel.postMessage({
+            command: commands[index], payload: index === 0 ? null : [], engine: currentCfg.engine,
+          });
         }
       });
-      const firstFailure = results.find(
-        (result): result is PromiseRejectedResult => result.status === 'rejected'
-      );
-      if (firstFailure) {
-        const message =
-          firstFailure.reason instanceof Error
-            ? firstFailure.reason.message
-            : String(firstFailure.reason);
+      const failures = results.flatMap((result, index) => {
+        if (result.status !== 'rejected' || listGenerations.get(commands[index]) !== listVersions[index]) return [];
+        const reason = result.reason instanceof Error
+          ? result.reason.message
+          : String(result.reason);
+        return [`${commands[index]}: ${reason}`];
+      });
+      if (failures.length) {
+        const message = failures.join('\n');
         if (message !== lastRefreshError) {
           lastRefreshError = message;
           reportError(message);
@@ -331,9 +424,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       try {
         await fileDetector.scan();
+        if (generation !== refreshGeneration || engineContextKey() !== initialContext) return;
         sendComposeState();
         const composeStatuses = await statusProvider.poll();
-        studioPanel.postMessage({ command: A.CONTAINERS_UPDATE, payload: composeStatuses });
+        if (generation !== refreshGeneration || engineContextKey() !== initialContext) return;
+        studioPanel.postMessage({
+          command: A.CONTAINERS_UPDATE, payload: composeStatuses, engine: currentCfg.engine,
+        });
       } catch (error) {
         reportError(error);
       }
@@ -341,13 +438,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
 
   async function sendSettingsState(): Promise<void> {
-    const current = getConfig();
     const hasRegistrySecret = Boolean(await context.secrets.get(SECRET_KEY));
+    const current = getConfig();
     const resolvedLanguage = resolveBackendLocale(current.language);
     studioPanel.postMessage({
       command: A.SETTINGS_UPDATE,
       payload: {
         ...current,
+        extensionVersion: context.extension.packageJSON.version,
         hasRegistrySecret,
         resolvedLanguage,
         vscodeLanguage: vscode.env.language || 'en',
@@ -376,19 +474,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return {};
   }
 
-  async function searchImages(provider: string, registryUrl: string, query: string) {
+  async function searchImages(
+    provider: string, registryUrl: string, query: string, signal?: AbortSignal
+  ) {
     const q = encodeURIComponent(query.trim());
     if (provider === 'quay' && !registryUrl) {
-      const data = await httpGetJson(`https://quay.io/api/v1/find/repositories?query=${q}`);
+      const data = await httpGetJson(`https://quay.io/api/v1/find/repositories?query=${q}`, {}, signal);
       return (data.results ?? []).slice(0, 12).map((r: any) => ({
         name: `quay.io/${r.namespace?.name || r.namespace}/${r.name}:latest`,
         description: r.description || 'Quay.io repository',
         source: 'Quay.io',
       }));
     }
-    if ((provider === 'dockerhub' || !registryUrl) && provider !== 'custom') {
+    if (provider === 'dockerhub' && !registryUrl) {
       const data = await httpGetJson(
-        `https://hub.docker.com/v2/search/repositories/?query=${q}&page_size=12`
+        `https://hub.docker.com/v2/search/repositories/?query=${q}&page_size=12`, {}, signal
       );
       return (data.results ?? [])
         .map((r: any) => {
@@ -406,7 +506,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         .filter((x: any) => Boolean(x.name));
     }
 
-    const host = cleanRegistryHost(registryUrl);
+    const host = defaultHostForProvider(provider, registryUrl);
+    if (!host) {
+      throw new Error(bt('provideRegistryUrl'));
+    }
     const currentCfg = getConfig();
     const secret = await context.secrets.get(SECRET_KEY);
     const headers = buildAuthHeaders(
@@ -414,7 +517,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       currentCfg.registryUsername,
       secret
     );
-    const data = await httpGetJson(`https://${host}/v2/_catalog?n=100`, headers);
+    const data = await httpGetJson(`https://${host}/v2/_catalog?n=100`, headers, signal);
     return (data.repositories ?? [])
       .filter((name: string) => name.toLowerCase().includes(query.toLowerCase()))
       .slice(0, 12)
@@ -497,27 +600,38 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       stdout?: string;
       stderr?: string;
       commandStr?: string;
-    }>
+    }>,
+    options?: { includeOutput?: boolean }
   ): Promise<boolean> {
-    studioPanel.postMessage({ command: A.OPERATION_START, payload: opKey });
-    try {
+    return withStudioProgress(opKey, label, async () => {
       const res = await withStatus(label, task);
       if (!res.success) {
         const msg = (
-          res.stderr || bt('engineFailedDefault', { engine: getEngineLabel() })
+          res.stderr || res.stdout || bt('engineFailedDefault', { engine: getEngineLabel() })
         ).trim();
-        studioPanel.postMessage({ command: A.ERROR, payload: { message: `${label}: ${msg}` } });
+        reportError(`${label}: ${msg}`);
+        if (res.stderr && res.stdout?.trim()) {
+          output.appendLine(res.stdout.trim());
+        }
         void showErrorWithCopy(`${label}: ${msg}`, res.commandStr);
         return false;
       }
+      const details = options?.includeOutput ? res.stdout?.trim() || '' : '';
+      if (details) {
+        output.appendLine(`[${new Date().toISOString()}] ${label}:\n${details}`);
+      }
+      const preview = details.length > 1200
+        ? `${details.slice(0, 1200)}\n${bt('cleanupResultsTruncated')}`
+        : details;
       studioPanel.postMessage({
         command: A.NOTIFICATION,
-        payload: { type: 'success', message: bt('opCompleted', { op: label }) },
+        payload: {
+          type: 'success',
+          message: [bt('opCompleted', { op: label }), preview].filter(Boolean).join('\n'),
+        },
       });
       return true;
-    } finally {
-      studioPanel.postMessage({ command: A.OPERATION_END, payload: opKey });
-    }
+    });
   }
 
   async function confirmPodmanAction(message: string, detail?: string): Promise<boolean> {
@@ -569,6 +683,205 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     await refreshAllStudioData();
   }
 
+  function resourceLabel(resource: RemovableResource): string {
+    return bt(resource === 'image' ? 'batchImages' : resource === 'volume' ? 'batchVolumes' : 'batchNetworks');
+  }
+
+  async function removeSelectedResources(
+    resource: RemovableResource,
+    targets: ResourceRemovalTarget[],
+    expectedEngine: ContainerEngine
+  ): Promise<void> {
+    if (!Array.isArray(targets) || targets.length === 0 ||
+        targets.some((item) => !item || typeof item.name !== 'string' ||
+          typeof item.identity !== 'string') ||
+        (expectedEngine !== 'podman' && expectedEngine !== 'docker')) {
+      throw new Error('Invalid resource selection. Refresh and try again.');
+    }
+    const cfg = getConfig();
+    const contextKey = () => {
+      const current = getConfig();
+      return JSON.stringify([
+        current.engine,
+        current.engine === 'podman' ? current.podmanPath : current.dockerPath,
+      ]);
+    };
+    const initialContext = contextKey();
+    if (cfg.engine !== expectedEngine) {
+      throw new Error('The active engine changed. Refresh and try again.');
+    }
+    const unique = Array.from(new Map(targets.map((target) => [target.name, target])).values());
+    if (unique.length !== targets.length) {
+      throw new Error('Duplicate resource selection. Refresh and try again.');
+    }
+    const names = unique.map((item) => item.name).join('\n');
+    const resourceName = resourceLabel(resource);
+    const yes = bt('yes');
+    const confirmed = await vscode.window.showWarningMessage(
+      bt('confirmSelectedResources', { count: unique.length, resource: resourceName }),
+      {
+        modal: true,
+        detail: bt(resource === 'volume' ? 'confirmSelectedVolumesDetail' : 'confirmSelectedResourcesDetail', { names }),
+      },
+      yes
+    );
+    if (confirmed !== yes) {
+      return;
+    }
+    if (contextKey() !== initialContext) {
+      throw new Error('The active engine or executable changed. Refresh and try again.');
+    }
+
+    const label = bt('batchOperation', {
+      action: bt('batchRemove'),
+      count: unique.length,
+      resource: resourceName,
+    });
+    try {
+      await notifyResult(`${resource}-remove-batch`, label, async () => {
+        const results = await podman.removeResourceSelection(resource, unique, expectedEngine);
+        const failures = results.filter((item) => !item.result.success);
+        const successes = results.filter((item) => item.result.success);
+        return {
+          success: failures.length === 0,
+          stdout: bt('removedResources', {
+            count: successes.length,
+            resource: resourceName,
+            names: successes.map((item) => item.name).join('\n'),
+          }),
+          stderr: failures.length
+            ? [
+                bt('batchPartialFailure', { completed: successes.length, total: results.length }),
+                ...failures.map((item) =>
+                  `${item.name}: ${(item.result.stderr || item.result.stdout || `exit code ${item.result.exitCode}`).trim()}`
+                ),
+              ].join('\n')
+            : '',
+        };
+      }, { includeOutput: true });
+    } finally {
+      await refreshAllStudioData();
+    }
+  }
+
+  async function cleanupUnusedResources(resource: 'volume' | 'network'): Promise<void> {
+    const engine = getConfig().engine;
+    const initialContext = engineContextKey();
+    const targets = await withStudioProgress(
+      `inspect-${resource}`,
+      bt('loadingResources', { resource: resourceLabel(resource) }),
+      async () => resource === 'volume'
+        ? (await podman.listVolumes())
+            .filter((volume) => volume.usage === 'unused')
+            .map((volume) => ({ name: volume.name, identity: volume.created }))
+        : (await podman.listNetworks())
+            .filter((network) => network.usage === 'unused' && !network.protected)
+            .map((network) => ({ name: network.name, identity: network.fullId }))
+    );
+    if (engineContextKey() !== initialContext) {
+      throw new Error('The active engine or executable changed. Refresh and try again.');
+    }
+    if (targets.length === 0) {
+      studioPanel.postMessage({
+        command: A.NOTIFICATION,
+        payload: { type: 'info', message: bt('noUnusedResources', { resource: resourceLabel(resource) }) },
+      });
+      return;
+    }
+    if (targets.some((target) => !target.identity)) {
+      throw new Error('Some unused resources could not be identified safely. Refresh and try again.');
+    }
+    await removeSelectedResources(resource, targets, engine);
+  }
+
+  async function refreshResourceList(
+    resource: string,
+    command: string,
+    task: () => Promise<unknown[]>
+  ): Promise<void> {
+    const engine = getConfig().engine;
+    const initialContext = engineContextKey();
+    const generation = nextListGeneration(command);
+    const isCurrent = () =>
+      listGenerations.get(command) === generation && engineContextKey() === initialContext;
+    await withStudioProgress(`list-${resource}`, bt('loadingResources', { resource }), async () => {
+      try {
+        const items = await task();
+        if (isCurrent()) {
+          studioPanel.postMessage({ command, payload: items, engine });
+        }
+      } catch (error) {
+        if (isCurrent()) {
+          studioPanel.postMessage({ command, payload: [], engine });
+          throw error;
+        }
+      }
+    });
+  }
+
+  async function runComposeServiceBatch(payload: any, composeFile?: string): Promise<void> {
+    const cfg = getConfig();
+    const settingsKey = () => {
+      const current = getConfig();
+      return JSON.stringify([
+        current.engine, current.dockerPath, current.podmanPath,
+        current.composePath, current.composeCommandStyle, current.inPod,
+      ]);
+    };
+    const initialSettings = settingsKey();
+    if (!composeFile || payload.file !== composeFile || payload.engine !== cfg.engine ||
+        !['up', 'stop', 'restart', 'down', 'build'].includes(payload.action) ||
+        typeof payload.rawYaml !== 'string' ||
+        !Array.isArray(payload.services) || payload.services.length === 0 ||
+        payload.services.some((service: unknown) =>
+          typeof service !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(service)) ||
+        new Set(payload.services).size !== payload.services.length) {
+      throw new Error('Invalid Compose selection or the active project changed. Refresh and try again.');
+    }
+    const services: string[] = payload.services;
+    const content = fs.readFileSync(composeFile, 'utf-8');
+    if (payload.rawYaml !== content) {
+      throw new Error('The Compose file changed. Refresh and try again.');
+    }
+    const doc = yamlService.parse(content);
+    if (services.some((service) => !Object.prototype.hasOwnProperty.call(doc.services || {}, service))) {
+      throw new Error('A selected Compose service no longer exists. Refresh and try again.');
+    }
+    if (payload.action === 'down') {
+      const yes = bt('yes');
+      const choice = await vscode.window.showWarningMessage(
+        bt('confirmComposeServiceDown', { services: services.join(', ') }),
+        { modal: true, detail: bt('confirmServiceContainerRemoval') },
+        yes
+      );
+      if (choice !== yes) {
+        return;
+      }
+    }
+    if (settingsKey() !== initialSettings || getActiveComposeFile() !== composeFile ||
+        fs.readFileSync(composeFile, 'utf-8') !== content) {
+      throw new Error('Compose settings or file changed. Refresh and try again.');
+    }
+    const action = payload.action as 'up' | 'stop' | 'restart' | 'down' | 'build';
+    const label = bt('batchOperation', {
+      action: bt(action === 'up' ? 'batchStart' : action === 'stop' ? 'batchStop' :
+        action === 'restart' ? 'batchRestart' : action === 'build' ? 'batchBuild' : 'batchRemove'),
+      count: services.length,
+      resource: bt('batchServices'),
+    });
+    try {
+      await notifyResult(`compose-${action}-batch`, label, () => {
+        if (action === 'up') return podman.composeUp(composeFile, { services });
+        if (action === 'stop') return podman.composeStop(composeFile, services);
+        if (action === 'restart') return podman.composeRestart(composeFile, services);
+        if (action === 'build') return podman.composeBuild(composeFile, services);
+        return podman.composeRemoveServices(composeFile, services, doc, content);
+      }, { includeOutput: action === 'down' });
+    } finally {
+      await refreshAllStudioData();
+    }
+  }
+
   // ==================== WEBVIEW MESSAGE HANDLER ====================
 
   studioPanel.onMessage(async (msg) => {
@@ -585,19 +898,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
         case M.SYSTEM_INFO_GET: {
           const info = await podman.getSystemInfo();
-          studioPanel.postMessage({ command: A.SYSTEM_INFO_UPDATE, payload: info });
+          studioPanel.postMessage({ command: A.SYSTEM_INFO_UPDATE, payload: info, engine });
           break;
         }
         case M.DISK_USAGE_GET: {
           const df = await podman.getDiskUsage();
-          studioPanel.postMessage({ command: A.DISK_USAGE_UPDATE, payload: df });
+          studioPanel.postMessage({ command: A.DISK_USAGE_UPDATE, payload: df, engine });
           break;
         }
 
         // Docker Contexts
         case M.DOCKER_CONTEXTS_LIST: {
-          const contexts = await podman.listDockerContexts();
-          studioPanel.postMessage({ command: A.DOCKER_CONTEXTS_UPDATE, payload: contexts });
+          await refreshResourceList('Docker contexts', A.DOCKER_CONTEXTS_UPDATE, () => podman.listDockerContexts());
           break;
         }
         case M.DOCKER_CONTEXT_USE: {
@@ -615,8 +927,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
         // Podman Machines
         case M.MACHINES_LIST: {
-          const machines = await podman.listMachines();
-          studioPanel.postMessage({ command: A.MACHINES_UPDATE, payload: machines });
+          await refreshResourceList('Podman machines', A.MACHINES_UPDATE, () => podman.listMachines());
           break;
         }
         case M.MACHINE_START: {
@@ -649,8 +960,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
         // Pods
         case M.PODS_LIST: {
-          const pods = await podman.listPods();
-          studioPanel.postMessage({ command: A.PODS_UPDATE, payload: pods });
+          await refreshAllStudioData();
           break;
         }
         case M.POD_CREATE: {
@@ -709,22 +1019,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           break;
         }
         case M.POD_LOGS: {
-          const res = await podman.getPodLogs(payload.podId, 300);
-          if (!res.success) {
-            throw new Error(res.stderr || 'Failed to read Podman pod logs.');
-          }
-          const entries = `${res.stdout}\n${res.stderr}`
-            .split(/\r?\n/)
-            .filter((l) => l.trim().length > 0)
-            .map((line) => logProvider.parseLine(`pod:${payload.podName || payload.podId}`, line));
-          studioPanel.postMessage({ command: A.LOG_HISTORY, payload: entries });
+          await withStudioProgress('pod-logs', bt('loadingLogs'), async () => {
+            const res = await podman.getPodLogs(payload.podId, 300);
+            if (!res.success) {
+              throw new Error(res.stderr || 'Failed to read Podman pod logs.');
+            }
+            const entries = `${res.stdout}\n${res.stderr}`
+              .split(/\r?\n/)
+              .filter((l) => l.trim().length > 0)
+              .map((line) => logProvider.parseLine(`pod:${payload.podName || payload.podId}`, line));
+            studioPanel.postMessage({ command: A.LOG_HISTORY, payload: entries });
+          });
           break;
         }
 
         // Containers
         case M.CONTAINERS_LIST: {
-          const list = await podman.listAllContainers();
-          studioPanel.postMessage({ command: A.ALL_CONTAINERS_UPDATE, payload: list });
+          await refreshAllStudioData();
           break;
         }
         case M.CONTAINER_CREATE: {
@@ -795,15 +1106,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           if (!cid) {
             break;
           }
-          const res = await podman.getContainerLogHistory(cid, 350);
-          if (!res.success) {
-            throw new Error(res.stderr || `Failed to read container logs: ${cid}`);
-          }
-          const entries = `${res.stdout}\n${res.stderr}`
-            .split(/\r?\n/)
-            .filter((l) => l.trim().length > 0)
-            .map((line) => logProvider.parseLine(payload.name || cid, line));
-          studioPanel.postMessage({ command: A.LOG_HISTORY, payload: entries });
+          await withStudioProgress('container-logs', bt('loadingLogs'), async () => {
+            const res = await podman.getContainerLogHistory(cid, 350);
+            if (!res.success) {
+              throw new Error(res.stderr || `Failed to read container logs: ${cid}`);
+            }
+            const entries = `${res.stdout}\n${res.stderr}`
+              .split(/\r?\n/)
+              .filter((l) => l.trim().length > 0)
+              .map((line) => logProvider.parseLine(payload.name || cid, line));
+            studioPanel.postMessage({ command: A.LOG_HISTORY, payload: entries });
+          });
           break;
         }
         case M.CONTAINER_LOGS_EXTERNAL: {
@@ -813,8 +1126,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
         // Images & Prune
         case M.IMAGES_LIST: {
-          const images = await podman.listImages();
-          studioPanel.postMessage({ command: A.IMAGES_UPDATE, payload: images });
+          await refreshResourceList(resourceLabel('image'), A.IMAGES_UPDATE, () => podman.listImages());
           break;
         }
         case M.IMAGE_PULL: {
@@ -824,8 +1136,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           await notifyResult('pulling', `Pull Image ${payload.imageName}`, () =>
             podman.pullImage(payload.imageName)
           );
-          const images = await podman.listImages();
-          studioPanel.postMessage({ command: A.IMAGES_UPDATE, payload: images });
+          await refreshResourceList(resourceLabel('image'), A.IMAGES_UPDATE, () => podman.listImages());
           break;
         }
         case M.IMAGE_BUILD: {
@@ -882,8 +1193,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           if (!(await confirmPodmanAction(bt('confirmPruneDangling')))) {
             break;
           }
-          await notifyResult('prune-images', 'Prune Dangling Images', () =>
-            podman.pruneDanglingImages()
+          await notifyResult(
+            'prune-images', 'Prune Dangling Images',
+            () => podman.pruneDanglingImages(), { includeOutput: true }
           );
           await refreshAllStudioData();
           break;
@@ -892,8 +1204,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           if (!(await confirmPodmanAction(bt('confirmPruneUnused')))) {
             break;
           }
-          await notifyResult('prune-all-images', 'Prune All Unused Images', () =>
-            podman.pruneAllUnusedImages()
+          await notifyResult(
+            'prune-all-images', 'Prune All Unused Images',
+            () => podman.pruneAllUnusedImages(), { includeOutput: true }
           );
           await refreshAllStudioData();
           break;
@@ -905,27 +1218,32 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           ))) {
             break;
           }
-          await notifyResult('prune-builder', `Clear ${engineLabel} Builder Cache`, () =>
-            podman.pruneBuilderCache()
+          await notifyResult(
+            'prune-builder', `Clear ${engineLabel} Builder Cache`,
+            () => podman.pruneBuilderCache(), { includeOutput: true }
           );
           await refreshAllStudioData();
           break;
         }
         case M.PRUNE_VOLUMES: {
-          if (!(await confirmPodmanAction(bt('confirmPruneVolumes')))) {
-            break;
+          await cleanupUnusedResources('volume');
+          break;
+        }
+        case M.PRUNE_NETWORKS: {
+          await cleanupUnusedResources('network');
+          break;
+        }
+        case M.RESOURCE_REMOVE_BATCH: {
+          if (payload.resource !== 'image' && payload.resource !== 'volume' && payload.resource !== 'network') {
+            throw new Error('Invalid resource type.');
           }
-          await notifyResult('prune-volumes', 'Prune Unused Volumes', () =>
-            podman.pruneVolumes()
-          );
-          await refreshAllStudioData();
+          await removeSelectedResources(payload.resource, payload.targets, payload.engine);
           break;
         }
 
         // Networks
         case M.NETWORKS_LIST: {
-          const nets = await podman.listNetworks();
-          studioPanel.postMessage({ command: A.NETWORKS_UPDATE, payload: nets });
+          await refreshResourceList(resourceLabel('network'), A.NETWORKS_UPDATE, () => podman.listNetworks());
           break;
         }
         case M.NETWORK_CREATE: {
@@ -953,8 +1271,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
         // Volumes
         case M.VOLUMES_LIST: {
-          const vols = await podman.listVolumes();
-          studioPanel.postMessage({ command: A.VOLUMES_UPDATE, payload: vols });
+          await refreshResourceList(resourceLabel('volume'), A.VOLUMES_UPDATE, () => podman.listVolumes());
           break;
         }
         case M.VOLUME_CREATE: {
@@ -981,6 +1298,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
 
         // Compose Stack
+        case M.STACK_SERVICES_BATCH: {
+          await runComposeServiceBatch(payload, composeFile);
+          break;
+        }
         case M.COMPOSE_FILES_LIST: {
           await fileDetector.scan();
           studioPanel.postMessage({
@@ -1032,6 +1353,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           break;
         }
         case M.COMPOSE_IMAGE_SEARCH: {
+          const generation = cancelImageSearch();
           const q = String(payload.query || '').trim();
           if (!q) {
             studioPanel.postMessage({
@@ -1041,13 +1363,34 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             break;
           }
           const current = getConfig();
-          const provider =
-            payload.registryType === 'configured'
-              ? current.registryProvider
-              : payload.registryType || current.registryProvider;
-          const regUrl = String(payload.registryUrl || current.registryUrl || '');
-          const results = await searchImages(provider, regUrl, q);
-          studioPanel.postMessage({ command: A.COMPOSE_IMAGE_RESULTS, payload: { results } });
+          const { provider, registryUrl } = resolveRegistrySearch(
+            payload.registryType, payload.registryUrl, current
+          );
+          const controller = new AbortController();
+          imageSearchController = controller;
+          try {
+            const results = await withStudioProgress(
+              'image-search',
+              bt('loadingResources', { resource: resourceLabel('image') }),
+              () => searchImages(provider, registryUrl, q, controller.signal)
+            );
+            if (generation === imageSearchGeneration) {
+              studioPanel.postMessage({ command: A.COMPOSE_IMAGE_RESULTS, payload: { results } });
+            }
+          } catch (error) {
+            if (generation === imageSearchGeneration) {
+              const message = error instanceof Error ? error.message : String(error);
+              studioPanel.postMessage({
+                command: A.COMPOSE_IMAGE_RESULTS, payload: { results: [], error: message },
+              });
+              throw error;
+            }
+            if (!controller.signal.aborted) {
+              output.appendLine(`[${new Date().toISOString()}] Image search: ${String(error)}`);
+            }
+          } finally {
+            if (imageSearchController === controller) imageSearchController = undefined;
+          }
           break;
         }
         case M.COMPOSE_FILE_CREATE: {
@@ -1528,62 +1871,67 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           break;
         }
         case M.SETTINGS_TEST: {
-          try {
-            const merged = { ...getConfig(), ...payload };
-            const cmd = merged.engine === 'podman' ? 'podman' : 'docker';
-            const secret =
-              payload.registrySecret || (await context.secrets.get(SECRET_KEY)) || '';
-            const host = defaultHostForProvider(merged.registryProvider, merged.registryUrl || '');
-            if (merged.registryAutoLogin && merged.registryAuthType !== 'bearer' && secret) {
-              const username =
-                merged.registryUsername || (merged.registryProvider === 'ecr' ? 'AWS' : '');
-              if (!username) {
-                throw new Error(bt('provideUsernameForLogin', { cmd }));
+          await withStudioProgress('registry-test', bt('testingRegistry'), async () => {
+            let secret = '';
+            try {
+              const merged = { ...getConfig(), ...payload };
+              const cmd = merged.engine === 'podman' ? 'podman' : 'docker';
+              secret = payload.registrySecret || (await context.secrets.get(SECRET_KEY)) || '';
+              const host = defaultHostForProvider(merged.registryProvider, merged.registryUrl || '');
+              if (merged.registryAutoLogin && merged.registryAuthType !== 'bearer' && secret) {
+                const username =
+                  merged.registryUsername || (merged.registryProvider === 'ecr' ? 'AWS' : '');
+                if (!username) {
+                  throw new Error(bt('provideUsernameForLogin', { cmd }));
+                }
+                if (!host && cmd === 'podman') {
+                  throw new Error(bt('provideRegistryUrl'));
+                }
+                const res = await podman.loginRegistry(host, username, secret, cmd);
+                if (!res.success) {
+                  throw new Error(res.stderr || `${cmd} login failed.`);
+                }
+                const okMsg = { ok: true, message: bt('engineLoginSuccess', { cmd, host }) };
+                studioPanel.postMessage({ command: A.SETTINGS_TEST_RESULT, payload: okMsg });
+                return;
               }
-              if (!host && cmd === 'podman') {
+              if (merged.registryProvider === 'quay' && !merged.registryUrl) {
+                await searchImages('quay', '', 'podman');
+                studioPanel.postMessage({
+                  command: A.SETTINGS_TEST_RESULT,
+                  payload: { ok: true, message: bt('quayOk') },
+                });
+                return;
+              }
+              if (merged.registryProvider === 'dockerhub' && !merged.registryUrl) {
+                await searchImages('dockerhub', '', 'alpine');
+                studioPanel.postMessage({
+                  command: A.SETTINGS_TEST_RESULT,
+                  payload: { ok: true, message: bt('dockerHubOk') },
+                });
+                return;
+              }
+              if (!host) {
                 throw new Error(bt('provideRegistryUrl'));
               }
-              const res = await podman.loginRegistry(host, username, secret, cmd);
-              if (!res.success) {
-                throw new Error(res.stderr || `${cmd} login failed.`);
-              }
-              const okMsg = { ok: true, message: bt('engineLoginSuccess', { cmd, host }) };
-              studioPanel.postMessage({ command: A.SETTINGS_TEST_RESULT, payload: okMsg });
-              break;
-            }
-            if (merged.registryProvider === 'quay' && !merged.registryUrl) {
-              await searchImages('quay', '', 'podman');
+              await httpGetJson(
+                `https://${host}/v2/_catalog?n=1`,
+                buildAuthHeaders(merged.registryAuthType, merged.registryUsername, secret)
+              );
               studioPanel.postMessage({
                 command: A.SETTINGS_TEST_RESULT,
-                payload: { ok: true, message: bt('quayOk') },
+                payload: { ok: true, message: bt('registryOk', { host }) },
               });
-              break;
-            }
-            if (merged.registryProvider === 'dockerhub' && !merged.registryUrl) {
-              await searchImages('dockerhub', '', 'alpine');
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              const safeMessage = secret ? message.split(secret).join('[redacted]') : message;
+              reportError(safeMessage);
               studioPanel.postMessage({
                 command: A.SETTINGS_TEST_RESULT,
-                payload: { ok: true, message: bt('dockerHubOk') },
+                payload: { ok: false, message: safeMessage },
               });
-              break;
             }
-            if (!host) {
-              throw new Error(bt('provideRegistryUrl'));
-            }
-            await httpGetJson(
-              `https://${host}/v2/_catalog?n=1`,
-              buildAuthHeaders(merged.registryAuthType, merged.registryUsername, secret)
-            );
-            studioPanel.postMessage({
-              command: A.SETTINGS_TEST_RESULT,
-              payload: { ok: true, message: bt('registryOk', { host }) },
-            });
-          } catch (err: any) {
-            studioPanel.postMessage({
-              command: A.SETTINGS_TEST_RESULT,
-              payload: { ok: false, message: err?.message || String(err) },
-            });
-          }
+          });
           break;
         }
         case M.SETTINGS_DISCONNECT: {
@@ -1632,6 +1980,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           );
           break;
         }
+        case M.OUTPUT_SHOW: {
+          output.show(true);
+          break;
+        }
       }
     } catch (err: unknown) {
       reportError(err);
@@ -1640,7 +1992,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // Push live status & log updates to Webview
   statusProvider.onStatusChange((containers) => {
-    studioPanel.postMessage({ command: A.CONTAINERS_UPDATE, payload: containers });
+    studioPanel.postMessage({
+      command: A.CONTAINERS_UPDATE, payload: containers, engine: getConfig().engine,
+    });
   });
   statusProvider.onError((message) => reportError(message));
   logProvider.onLogLine((entry) => {

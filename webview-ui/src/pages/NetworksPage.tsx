@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Network, Plus, RefreshCw, Search, Trash2 } from 'lucide-react';
+import { Network, Plus, RefreshCw, Search, Sparkles, Trash2 } from 'lucide-react';
 import {
   ActionPillButton,
   EmptyState,
@@ -7,9 +7,12 @@ import {
   SmallActionButton,
   StatCard,
 } from '../components/Shared';
+import { SelectionBar, useResourceSelection } from '../components/ResourceSelection';
 import { useI18n } from '../i18n';
-import { useStudioStore } from '../store';
+import { PodmanNetwork, useStudioStore } from '../store';
 import { useVsCodeMessaging } from '../vscode';
+
+const networkSelectionKey = (network: PodmanNetwork) => `${network.name}\0${network.fullId}`;
 
 export const NetworksPage: React.FC = () => {
   const { postMessage } = useVsCodeMessaging();
@@ -17,6 +20,7 @@ export const NetworksPage: React.FC = () => {
   const { networks, operationInProgress } = useStudioStore();
 
   const [search, setSearch] = useState('');
+  const [usageFilter, setUsageFilter] = useState<'all' | 'unused' | 'inUse'>('all');
   const [showCreate, setShowCreate] = useState(false);
   const [netName, setNetName] = useState('');
   const [netDriver, setNetDriver] = useState('bridge');
@@ -28,16 +32,30 @@ export const NetworksPage: React.FC = () => {
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) {
-      return networks;
-    }
     return networks.filter(
       (n) =>
-        n.name.toLowerCase().includes(q) ||
-        n.driver.toLowerCase().includes(q) ||
-        n.subnets.some((s) => s.subnet.includes(q))
+        (usageFilter === 'all' || n.usage === usageFilter) &&
+        (!q || n.name.toLowerCase().includes(q) ||
+          n.driver.toLowerCase().includes(q) ||
+          n.subnets.some((s) => s.subnet.includes(q)))
     );
-  }, [networks, search]);
+  }, [networks, search, usageFilter]);
+  const selectable = useMemo(
+    () => networks.filter((network) => network.usage === 'unused' && !network.protected && Boolean(network.fullId)),
+    [networks]
+  );
+  const visibleSelectable = useMemo(
+    () => filtered.filter((network) => network.usage === 'unused' && !network.protected && Boolean(network.fullId)),
+    [filtered]
+  );
+  const selection = useResourceSelection(selectable, visibleSelectable, networkSelectionKey, engine);
+  const removeNetworks = (selected: PodmanNetwork[]) => {
+    postMessage('resource:remove:batch', {
+      resource: 'network',
+      engine,
+      targets: selected.map((network) => ({ name: network.name, identity: network.fullId })),
+    });
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -61,6 +79,12 @@ export const NetworksPage: React.FC = () => {
             onClick={() => setShowCreate(true)}
           />
           <ActionPillButton
+            label={`${t.common.delete} ${t.images.filterUnused}`}
+            disabled={busy}
+            icon={<Sparkles className="w-3.5 h-3.5" />}
+            onClick={() => postMessage('prune:networks')}
+          />
+          <ActionPillButton
             label={t.common.refresh}
             loading={busy}
             icon={<RefreshCw className="w-3.5 h-3.5" />}
@@ -71,11 +95,16 @@ export const NetworksPage: React.FC = () => {
 
       {/* Content */}
       <div className="flex-1 overflow-auto p-6 space-y-5">
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-4 gap-3">
           <StatCard
             label={t.networks.statConfigured}
             value={networks.length}
             detail={engine === 'podman' ? 'Netavark / Bridge' : 'Bridge / Overlay'}
+          />
+          <StatCard
+            label={t.images.filterUnused}
+            value={networks.filter((n) => n.usage === 'unused' && !n.protected).length}
+            detail={t.common.usageHint}
           />
           <StatCard
             label={t.networks.statInternalDns}
@@ -89,16 +118,41 @@ export const NetworksPage: React.FC = () => {
           />
         </div>
 
-        <div className="relative">
-          <Search className="w-4 h-4 text-text-muted absolute left-3 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder={t.networks.searchPlaceholder}
-            className="input-field pl-9"
-          />
+        <div className="flex items-center gap-3 flex-wrap">
+          <div className="relative flex-1 min-w-[220px]">
+            <Search className="w-4 h-4 text-text-muted absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={t.networks.searchPlaceholder}
+              className="input-field pl-9"
+            />
+          </div>
+          <div className="flex items-center gap-1 bg-panel-card border border-panel-border rounded-md p-1">
+            {([['all', t.common.all], ['unused', t.images.filterUnused], ['inUse', t.images.filterInUse]] as const).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setUsageFilter(id)}
+                className={`px-2.5 py-1 text-xs rounded ${usageFilter === id ? 'bg-accent-purple text-white' : 'text-text-secondary'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
+        <p className="text-xs text-text-secondary">{t.common.usageHint}</p>
+
+        <SelectionBar selection={selection} busy={busy}>
+          <SmallActionButton
+            label={`${t.common.delete} (${selection.selected.length})`}
+            danger
+            disabled={busy}
+            icon={<Trash2 className="w-3 h-3" />}
+            onClick={() => removeNetworks(selection.selected)}
+          />
+        </SelectionBar>
 
         {filtered.length === 0 ? (
           <EmptyState
@@ -109,23 +163,29 @@ export const NetworksPage: React.FC = () => {
         ) : (
           <div className="space-y-2.5">
             {filtered.map((n) => {
-              const isDefault =
-                n.name === 'podman' ||
-                n.name === 'bridge' ||
-                n.name === 'host' ||
-                n.name === 'none';
+              const isDefault = n.protected;
               return (
                 <div
                   key={n.id || n.name}
                   className="bg-panel-card border border-panel-border rounded-md px-4 py-3.5 flex items-center justify-between gap-4 shadow-card"
                 >
-                  <div className="space-y-1 min-w-0">
+                  <input
+                    type="checkbox"
+                    aria-label={fmt(t.common.selectResource, { name: n.name })}
+                    checked={selection.selectedIds.has(networkSelectionKey(n))}
+                    disabled={busy || isDefault || n.usage !== 'unused' || !n.fullId}
+                    onChange={() => selection.toggle(networkSelectionKey(n))}
+                  />
+                  <div className="space-y-1 min-w-0 flex-1">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-semibold text-sm text-text-primary font-mono">
                         {n.name}
                       </span>
                       <span className="px-2 py-0.5 text-[10px] rounded bg-panel-bg border border-panel-border text-text-secondary">
                         {n.driver}
+                      </span>
+                      <span className="px-2 py-0.5 text-[10px] rounded bg-panel-bg border border-panel-border text-text-secondary" title={t.common.usageHint}>
+                        {isDefault ? t.common.default : n.usage === 'unused' ? t.images.filterUnused : t.images.filterInUse}
                       </span>
                       {n.dnsEnabled && (
                         <span className="px-2 py-0.5 text-[10px] rounded bg-green-500/15 text-accent-green border border-accent-green">
@@ -154,14 +214,14 @@ export const NetworksPage: React.FC = () => {
                   <SmallActionButton
                     label={t.common.delete}
                     danger
-                    disabled={busy || isDefault}
+                    disabled={busy || isDefault || n.usage !== 'unused' || !n.fullId}
                     title={
                       isDefault
                         ? t.networks.defaultNetProtectedTooltip
                         : t.networks.removeNetworkTooltip
                     }
                     icon={<Trash2 className="w-3 h-3" />}
-                    onClick={() => postMessage('network:remove', { networkName: n.name })}
+                    onClick={() => removeNetworks([n])}
                   />
                 </div>
               );

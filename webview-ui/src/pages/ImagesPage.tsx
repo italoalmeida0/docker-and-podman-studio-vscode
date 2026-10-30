@@ -18,9 +18,18 @@ import {
   SmallActionButton,
   StatCard,
 } from '../components/Shared';
+import { SelectionBar, useResourceSelection } from '../components/ResourceSelection';
 import { useI18n } from '../i18n';
 import { PodmanImage, useStudioStore } from '../store';
 import { useVsCodeMessaging } from '../vscode';
+
+function imageRemovalName(image: PodmanImage): string {
+  return image.dangling ? image.fullId || image.id : `${image.repository}:${image.tag}`;
+}
+
+function imageSelectionKey(image: PodmanImage): string {
+  return `${imageRemovalName(image)}\0${image.fullId || image.id}`;
+}
 
 export const ImagesPage: React.FC = () => {
   const { postMessage } = useVsCodeMessaging();
@@ -88,6 +97,18 @@ export const ImagesPage: React.FC = () => {
       );
     });
   }, [images, search, filterMode]);
+  const selection = useResourceSelection(images, filtered, imageSelectionKey, engine);
+
+  const removeImages = (selected: PodmanImage[]) => {
+    postMessage('resource:remove:batch', {
+      resource: 'image',
+      engine,
+      targets: selected.map((image) => ({
+        name: imageRemovalName(image),
+        identity: image.fullId || image.id,
+      })),
+    });
+  };
 
   const handlePull = () => {
     if (!pullName.trim()) {
@@ -241,6 +262,16 @@ export const ImagesPage: React.FC = () => {
           </div>
         </div>
 
+        <SelectionBar selection={selection} busy={busy}>
+          <SmallActionButton
+            label={`${t.common.delete} (${selection.selected.length})`}
+            danger
+            disabled={busy}
+            icon={<Trash2 className="w-3 h-3" />}
+            onClick={() => removeImages(selection.selected)}
+          />
+        </SelectionBar>
+
         {/* Images Table */}
         {filtered.length === 0 ? (
           <EmptyState
@@ -253,6 +284,7 @@ export const ImagesPage: React.FC = () => {
             <table className="w-full text-xs">
               <thead>
                 <tr className="border-b border-panel-border text-text-secondary text-left bg-panel-bg">
+                  <th className="px-4 py-3"><span className="sr-only">{t.common.selectVisible}</span></th>
                   <th className="px-4 py-3 font-medium">{t.images.colRepository}</th>
                   <th className="px-4 py-3 font-medium">{t.images.colTag}</th>
                   <th className="px-4 py-3 font-medium">{t.images.colId}</th>
@@ -264,6 +296,15 @@ export const ImagesPage: React.FC = () => {
               <tbody className="divide-y divide-panel-border">
                 {filtered.map((img) => (
                   <tr key={`${img.id}-${img.repository}-${img.tag}`} className="hover:bg-panel-card-hover">
+                    <td className="px-4 py-3">
+                      <input
+                        type="checkbox"
+                        aria-label={fmt(t.common.selectResource, { name: imageRemovalName(img) })}
+                        checked={selection.selectedIds.has(imageSelectionKey(img))}
+                        disabled={busy}
+                        onChange={() => selection.toggle(imageSelectionKey(img))}
+                      />
+                    </td>
                     <td className="px-4 py-3 font-mono font-medium text-text-primary break-all">
                       {img.repository}
                     </td>
@@ -311,11 +352,7 @@ export const ImagesPage: React.FC = () => {
                           danger
                           disabled={busy}
                           icon={<Trash2 className="w-3 h-3" />}
-                          onClick={() =>
-                            postMessage('image:remove', {
-                              imageId: img.dangling ? img.id : `${img.repository}:${img.tag}`,
-                            })
-                          }
+                          onClick={() => removeImages([img])}
                         />
                       </div>
                     </td>

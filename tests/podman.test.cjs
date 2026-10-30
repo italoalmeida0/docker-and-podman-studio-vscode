@@ -298,8 +298,12 @@ test('Podman-specific commands retain the Podman engine when settings change', a
     config.engine = 'docker';
     return [{ service: 'app', fullId: 'a'.repeat(64) }];
   };
-  await service.composeRemoveServices(path.resolve('compose.yaml'), ['app']);
-  assert.equal(calls[1].options.engineOverride, 'podman');
+  service.runComposeCommand = async (file) => ok(fs.readFileSync(file, 'utf8'));
+  await assert.rejects(
+    () => service.composeRemoveServices(composeFixture, ['app']),
+    /settings or file changed/i
+  );
+  assert.equal(calls.length, 1, 'no container may be removed after the engine changes');
 });
 
 test('does not match Compose containers from another file in the same directory', async () => {

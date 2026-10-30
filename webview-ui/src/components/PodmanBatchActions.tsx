@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Play, RotateCcw, Square } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { ServiceStatus } from '../store';
@@ -78,6 +78,11 @@ export const PodmanBatchActions: React.FC<{
   const restart = selection.selected.filter(
     (item) => item.state !== 'paused' && item.state !== 'stopping'
   );
+  const checkbox = useRef<HTMLInputElement>(null);
+  const mixed = selection.visibleSelected > 0 && selection.visibleSelected < selection.visibleCount;
+  useEffect(() => {
+    if (checkbox.current) checkbox.current.indeterminate = mixed;
+  }, [mixed]);
 
   if (selection.visibleCount === 0 && selection.selected.length === 0) {
     return null;
@@ -87,12 +92,11 @@ export const PodmanBatchActions: React.FC<{
     <div className="flex items-center gap-3 flex-wrap bg-panel-card border border-panel-border rounded-md px-3 py-2">
       <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer">
         <input
+          ref={checkbox}
           type="checkbox"
           checked={selection.visibleCount > 0 && selection.visibleSelected === selection.visibleCount}
           aria-checked={
-            selection.visibleSelected > 0 && selection.visibleSelected < selection.visibleCount
-              ? 'mixed'
-              : selection.visibleSelected === selection.visibleCount && selection.visibleCount > 0
+            mixed ? 'mixed' : selection.visibleSelected === selection.visibleCount && selection.visibleCount > 0
           }
           disabled={busy || selection.visibleCount === 0}
           onChange={selection.toggleVisible}

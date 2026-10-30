@@ -23,6 +23,8 @@ import {
   PodmanBatchAction,
   PodmanBatchItemResult,
   PodmanBatchResource,
+  RemovableResource,
+  ResourceRemovalTarget,
   ServiceStatus,
 } from '../types';
 
@@ -673,6 +675,17 @@ export class PodmanService {
     }
   }
 
+  private resourceJsonArray(raw: string, engine: ContainerEngine): any[] {
+    if (engine === 'docker' && !raw.trim()) {
+      return [];
+    }
+    try {
+      return this.safeJsonArray(raw, 'podman');
+    } catch (error) {
+      throw new Error(`${getEngineLabel(engine)} returned invalid resource data: ${String(error)}`);
+    }
+  }
+
   // ==================== SYSTEM INFO, DF, CONTEXTS & MACHINES ====================
 
   private async getComposeVersionString(engine: ContainerEngine): Promise<string> {
@@ -1149,14 +1162,13 @@ export class PodmanService {
 
   public async listAllContainers(): Promise<PodmanContainer[]> {
     const engine = this.getActiveEngine();
-    const res = await this.runEngineCommand(['ps', '-a', ...this.getJsonFormatArgs(engine)], {
+    const res = await this.runEngineCommand(['ps', '-a', '--no-trunc', ...this.getJsonFormatArgs(engine)], {
       engineOverride: engine,
     });
-    this.requireQuerySuccess(res, 'Podman container list', engine);
     if (!res.success) {
-      return [];
+      throw new Error(`Container list: ${(res.stderr || res.stdout || `exit code ${res.exitCode}`).trim()}`);
     }
-    return this.safeJsonArray(res.stdout, engine).map((n) => {
+    return this.resourceJsonArray(res.stdout, engine).map((n) => {
       const fullId = stripShaPrefix(String(n.Id || n.ID || ''));
       if (engine === 'podman' && !/^[a-f0-9]{12,64}$/i.test(fullId)) {
         throw new Error('Podman container list returned an invalid container ID.');
@@ -1441,18 +1453,17 @@ export class PodmanService {
   public async listImages(knownContainers?: PodmanContainer[]): Promise<PodmanImage[]> {
     const engine = this.getActiveEngine();
     const [res, containers] = await Promise.all([
-      this.runEngineCommand(['images', ...this.getJsonFormatArgs(engine)], {
+      this.runEngineCommand(['images', '--no-trunc', ...this.getJsonFormatArgs(engine)], {
         engineOverride: engine,
       }),
       knownContainers ? Promise.resolve(knownContainers) : this.listAllContainers(),
     ]);
     if (!res.success) {
-      this.requireQuerySuccess(res, 'Podman image list', engine);
-      return [];
+      throw new Error(`Image list: ${(res.stderr || res.stdout || `exit code ${res.exitCode}`).trim()}`);
     }
 
     const items: PodmanImage[] = [];
-    for (const img of this.safeJsonArray(res.stdout, engine)) {
+    for (const img of this.resourceJsonArray(res.stdout, engine)) {
       const rawId = String(img.Id || img.ID || '');
       const cleanId = stripShaPrefix(rawId);
       const shortId = cleanId.substring(0, 12);
@@ -1614,14 +1625,50 @@ export class PodmanService {
 
   public async listVolumes(): Promise<PodmanVolume[]> {
     const engine = this.getActiveEngine();
-    const res = await this.runEngineCommand(['volume', 'ls', ...this.getJsonFormatArgs(engine)], {
-      engineOverride: engine,
-    });
-    this.requireQuerySuccess(res, 'Podman volume list', engine);
-    if (!res.success) {
-      return [];
+    const format = this.getJsonFormatArgs(engine);
+    const [res, unused] = await Promise.all([
+      this.runEngineCommand(['volume', 'ls', ...format], { engineOverride: engine }),
+      this.runEngineCommand(
+        ['volume', 'ls', '--filter', 'dangling=true', ...format],
+        { engineOverride: engine }
+      ),
+    ]);
+    for (const [result, description] of [[res, 'Volume list'], [unused, 'Unused volume list']] as const) {
+      if (!result.success) {
+        throw new Error(`${description}: ${(result.stderr || result.stdout || `exit code ${result.exitCode}`).trim()}`);
+      }
     }
-    return this.safeJsonArray(res.stdout, engine).map((v) => {
+    const listed = this.resourceJsonArray(res.stdout, engine);
+    const unusedNames = new Set(
+      this.resourceJsonArray(unused.stdout, engine).map((v) => String(v.Name || v.name || ''))
+    );
+    const details = new Map<string, Record<string, unknown>>();
+    if (engine === 'docker' && listed.length) {
+      const names = listed.map((volume) => String(volume.Name || volume.name || ''));
+      if (names.some((name) => !name)) {
+        throw new Error('Docker volume list returned a volume without a name.');
+      }
+      for (let index = 0; index < names.length; index += 100) {
+        const inspected = await this.runEngineCommand(
+          ['volume', 'inspect', '--', ...names.slice(index, index + 100)],
+          { engineOverride: engine }
+        );
+        if (!inspected.success) {
+          throw new Error(`Volume inspection: ${(inspected.stderr || inspected.stdout || `exit code ${inspected.exitCode}`).trim()}`);
+        }
+        for (const volume of this.resourceJsonArray(inspected.stdout, engine)) {
+          details.set(String(volume.Name || ''), volume);
+        }
+      }
+      if (names.some((name) => !details.has(name))) {
+        throw new Error('Docker volume inspection did not return every listed volume.');
+      }
+    }
+    return listed.map((listedVolume) => {
+      const v = engine === 'docker' ? details.get(String(listedVolume.Name || listedVolume.name)) : listedVolume;
+      if (!v) {
+        throw new Error('Docker volume inspection did not return every listed volume.');
+      }
       const labels = parseLabels(v.Labels);
       const name = String(v.Name || v.name || '');
       const isHex64 = /^[a-f0-9]{64}$/i.test(name);
@@ -1635,6 +1682,7 @@ export class PodmanService {
         composeProject:
           labels['com.docker.compose.project'] || labels['io.podman.compose.project'] || '',
         labels,
+        usage: unusedNames.has(name) ? 'unused' : 'inUse',
       };
     });
   }
@@ -1670,21 +1718,90 @@ export class PodmanService {
   }
 
   public async pruneVolumes(): Promise<CommandResult> {
-    return this.runEngineCommand(['volume', 'prune', '-f'], { timeoutMs: ACTION_TIMEOUT_MS });
+    return this.runEngineCommand(['volume', 'prune', '--all', '-f'], { timeoutMs: ACTION_TIMEOUT_MS });
   }
 
   // ==================== NETWORKS ====================
 
   public async listNetworks(): Promise<PodmanNetwork[]> {
     const engine = this.getActiveEngine();
-    const res = await this.runEngineCommand(['network', 'ls', ...this.getJsonFormatArgs(engine)], {
-      engineOverride: engine,
-    });
-    this.requireQuerySuccess(res, 'Podman network list', engine);
-    if (!res.success) {
-      return [];
+    const format = this.getJsonFormatArgs(engine);
+    const [res, usage, info] = await Promise.all([
+      this.runEngineCommand(['network', 'ls', '--no-trunc', ...format], { engineOverride: engine }),
+      engine === 'podman'
+        ? this.runEngineCommand(
+            ['network', 'ls', '--no-trunc', '--filter', 'dangling=true', ...format],
+            { engineOverride: engine }
+          )
+        : this.runEngineCommand(
+            ['ps', '-a', ...format],
+            { engineOverride: engine }
+          ),
+      engine === 'podman'
+        ? this.runEngineCommand(['info', '--format', 'json'], { engineOverride: engine })
+        : Promise.resolve(undefined),
+    ]);
+    for (const [result, description] of [[res, 'Network list'], [usage, 'Network usage list']] as const) {
+      if (!result.success) {
+        throw new Error(`${description}: ${(result.stderr || result.stdout || `exit code ${result.exitCode}`).trim()}`);
+      }
     }
-    return this.safeJsonArray(res.stdout, engine).map((n) => {
+    if (info && !info.success) {
+      throw new Error(`Podman network configuration: ${(info.stderr || info.stdout || `exit code ${info.exitCode}`).trim()}`);
+    }
+    const defaultNetwork = info
+      ? String(this.safeJsonArray(info.stdout, engine)[0]?.host?.networkBackendInfo?.defaultNetwork || '')
+      : '';
+    if (engine === 'podman' && !defaultNetwork) {
+      throw new Error('Podman did not report its default network; network removal is unavailable.');
+    }
+    const listed = this.resourceJsonArray(res.stdout, engine);
+    const usageItems = this.resourceJsonArray(usage.stdout, engine);
+    const unusedNames = new Set<string>();
+    if (engine === 'podman') {
+      for (const network of usageItems) {
+        unusedNames.add(String(network.name || network.Name || ''));
+      }
+    } else {
+      const referenced = new Set<string>();
+      for (const container of usageItems) {
+        if (typeof container.Networks !== 'string' && !Array.isArray(container.Networks)) {
+          throw new Error('Docker container list did not report network references.');
+        }
+        for (const name of parseCsvOrArray(container.Networks)) referenced.add(name);
+      }
+      const ids = listed.map((network) => String(network.ID || network.Id || network.id || ''));
+      if (ids.some((id) => !id)) {
+        throw new Error('Docker network list returned a network without an ID.');
+      }
+      const inspected = new Map<string, Record<string, unknown>>();
+      for (let index = 0; index < ids.length; index += 100) {
+        const result = await this.runEngineCommand(
+          ['network', 'inspect', '--', ...ids.slice(index, index + 100)],
+          { engineOverride: engine }
+        );
+        if (!result.success) {
+          throw new Error(`Network inspection: ${(result.stderr || result.stdout || `exit code ${result.exitCode}`).trim()}`);
+        }
+        for (const network of this.resourceJsonArray(result.stdout, engine)) {
+          inspected.set(String(network.Id || network.ID || ''), network);
+        }
+      }
+      for (const network of listed) {
+        const id = String(network.ID || network.Id || network.id || '');
+        const details = inspected.get(id);
+        if (!details || !Object.prototype.hasOwnProperty.call(details, 'Containers') ||
+            (details.Containers !== null &&
+              (typeof details.Containers !== 'object' || Array.isArray(details.Containers)))) {
+          throw new Error('Docker network inspection did not report all network attachments.');
+        }
+        const name = String(network.Name || network.name || '');
+        if (!referenced.has(name) && Object.keys(details.Containers || {}).length === 0) {
+          unusedNames.add(name);
+        }
+      }
+    }
+    return listed.map((n) => {
       const labels = parseLabels(n.labels ?? n.Labels);
       const rawSubnets = Array.isArray(n.subnets)
         ? n.subnets
@@ -1699,9 +1816,11 @@ export class PodmanService {
         name !== 'bridge' &&
         name !== 'host' &&
         name !== 'none';
+      const fullId = stripShaPrefix(String(n.id || n.ID || n.Id || ''));
 
       return {
-        id: stripShaPrefix(String(n.id || n.ID || n.Id || '')).substring(0, 12),
+        id: fullId.substring(0, 12),
+        fullId,
         name,
         driver,
         networkInterface: String(n.network_interface || n.NetworkInterface || ''),
@@ -1715,6 +1834,9 @@ export class PodmanService {
         ipv6Enabled: parseBool(n.ipv6_enabled ?? n.IPv6Enabled ?? n.IPv6),
         composeProject:
           labels['com.docker.compose.project'] || labels['io.podman.compose.project'] || '',
+        usage: unusedNames.has(name) ? 'unused' : 'inUse',
+        protected: ['podman', 'bridge', 'host', 'none', defaultNetwork].includes(name) ||
+          (engine === 'docker' && String(n.Scope || n.scope || 'local') !== 'local'),
       };
     });
   }
@@ -1754,6 +1876,116 @@ export class PodmanService {
     }
     args.push(name);
     return this.runEngineCommand(args, { timeoutMs: ACTION_TIMEOUT_MS });
+  }
+
+  public async removeResourceSelection(
+    resource: RemovableResource,
+    requested: ResourceRemovalTarget[],
+    expectedEngine: ContainerEngine
+  ): Promise<PodmanBatchItemResult[]> {
+    const cfg = getConfig();
+    const contextKey = () => {
+      const current = getConfig();
+      return JSON.stringify([
+        current.engine,
+        current.engine === 'podman' ? current.podmanPath : current.dockerPath,
+      ]);
+    };
+    const initialContext = contextKey();
+    if (cfg.engine !== expectedEngine ||
+        !['image', 'volume', 'network'].includes(resource) ||
+        !Array.isArray(requested) || requested.length === 0 ||
+        requested.some((item) =>
+          !item || typeof item.name !== 'string' || typeof item.identity !== 'string' ||
+          !/^[a-zA-Z0-9][a-zA-Z0-9._:/@+-]*$/.test(item.name) ||
+          !item.identity ||
+          (resource !== 'volume' && !/^[a-f0-9]{64}$/i.test(stripShaPrefix(item.identity)))
+        )) {
+      throw new Error('Invalid resource selection or active engine changed. Refresh and try again.');
+    }
+
+    const targets = new Map<string, ResourceRemovalTarget>();
+    for (const item of requested) {
+      const previous = targets.get(item.name);
+      if (previous && previous.identity !== item.identity) {
+        throw new Error('The selected resources have conflicting identities. Refresh and try again.');
+      }
+      targets.set(item.name, item);
+    }
+
+    const available: ResourceRemovalTarget[] = resource === 'image'
+      ? (await this.listImages()).map((image) => ({
+          name: image.dangling ? image.fullId : `${image.repository}:${image.tag}`,
+          identity: image.fullId,
+        }))
+      : resource === 'volume'
+        ? (await this.listVolumes()).filter((volume) => volume.usage === 'unused')
+            .map((volume) => ({ name: volume.name, identity: volume.created }))
+        : (await this.listNetworks())
+            .filter((network) => network.usage === 'unused' && !network.protected)
+            .map((network) => ({ name: network.name, identity: network.fullId }));
+    if (contextKey() !== initialContext) {
+      throw new Error('The active engine or executable changed. Refresh and try again.');
+    }
+    const availableByName = new Map(available.map((item) => [item.name, item.identity]));
+    if ([...targets.values()].some((item) =>
+      !availableByName.has(item.name) || availableByName.get(item.name) !== item.identity
+    )) {
+      throw new Error('A selected resource changed, is in use, or is protected. Refresh and try again.');
+    }
+
+    const results: PodmanBatchItemResult[] = [];
+    for (const item of targets.values()) {
+      const fail = (message: string): void => {
+        results.push({
+          id: item.name,
+          name: item.name,
+          result: { success: false, stdout: '', stderr: message, exitCode: 1 },
+        });
+      };
+      if (contextKey() !== initialContext) {
+        fail('The active engine or executable changed; this resource was not removed.');
+        continue;
+      }
+      if (resource !== 'network') {
+        const inspected = await this.runEngineCommand([resource, 'inspect', '--', item.name], {
+          engineOverride: expectedEngine,
+        });
+        if (!inspected.success) {
+          fail(`Could not recheck this resource: ${(inspected.stderr || inspected.stdout || `exit code ${inspected.exitCode}`).trim()}`);
+          continue;
+        }
+        let current: Record<string, unknown>[];
+        try {
+          current = this.resourceJsonArray(inspected.stdout, expectedEngine);
+        } catch (error) {
+          fail(`Could not recheck this resource: ${error instanceof Error ? error.message : String(error)}`);
+          continue;
+        }
+        const inspectedIdentity = resource === 'volume'
+          ? String(current[0]?.CreatedAt || current[0]?.created_at || '')
+          : stripShaPrefix(String(current[0]?.Id || current[0]?.ID || '')).toLowerCase();
+        const expectedIdentity = resource === 'volume'
+          ? item.identity
+          : stripShaPrefix(item.identity).toLowerCase();
+        if (current.length !== 1 || inspectedIdentity !== expectedIdentity ||
+            (resource === 'volume' && String(current[0]?.Name || current[0]?.name || '') !== item.name)) {
+          fail('The resource changed after confirmation and was not removed.');
+          continue;
+        }
+        if (contextKey() !== initialContext) {
+          fail('The active engine or executable changed; this resource was not removed.');
+          continue;
+        }
+      }
+      const target = resource === 'network' && item.identity ? item.identity : item.name;
+      const result = await this.runEngineCommand([resource, 'rm', '--', target], {
+        timeoutMs: ACTION_TIMEOUT_MS,
+        engineOverride: expectedEngine,
+      });
+      results.push({ id: item.name, name: item.name, result });
+    }
+    return results;
   }
 
   // ==================== REGISTRY AUTH ====================
@@ -1993,11 +2225,104 @@ export class PodmanService {
   public async composeRemoveServices(
     composeFile: string,
     services: string[],
-    composeDoc?: ComposeDocument
+    composeDoc?: ComposeDocument,
+    expectedComposeContent?: string
   ): Promise<CommandResult> {
     const engine = this.getActiveEngine();
+    if (!Array.isArray(services) || services.length === 0 ||
+        services.some((service) => typeof service !== 'string' ||
+          !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(service))) {
+      throw new Error('Select at least one valid Compose service.');
+    }
+    if (expectedComposeContent !== undefined &&
+        fs.readFileSync(composeFile, 'utf-8') !== expectedComposeContent) {
+      throw new Error('The Compose file changed. Refresh and try again.');
+    }
+    if (engine === 'podman') {
+      const targets = await this.getPodmanComposeTargets(composeFile, services);
+      if (expectedComposeContent !== undefined &&
+          fs.readFileSync(composeFile, 'utf-8') !== expectedComposeContent) {
+        throw new Error('The Compose file changed. Refresh and try again.');
+      }
+      const removed: string[] = [];
+      const failures: string[] = [];
+      let firstFailure: CommandResult | undefined;
+      const timeouts = new Map([...targets.selected].map((service) => [
+        service, stopTimeoutSeconds(targets.definitions[service]),
+      ]));
+      const ensureUnchanged = () => {
+        try {
+          targets.ensureUnchanged();
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw new Error(removed.length
+            ? `${message}\nAlready removed: ${removed.join(', ')}`
+            : message);
+        }
+      };
+      for (const container of targets.containers) {
+        ensureUnchanged();
+        const timeout = timeouts.get(container.service);
+        const stopped = await this.runEngineCommand([
+          'container', 'stop', ...(timeout === undefined ? [] : ['--time', String(timeout)]),
+          container.fullId,
+        ], {
+          timeoutMs: ACTION_TIMEOUT_MS,
+          engineOverride: 'podman',
+        });
+        if (!stopped.success) {
+          firstFailure ??= stopped;
+          failures.push(`${container.name}: ${(stopped.stderr || stopped.stdout || `exit code ${stopped.exitCode}`).trim()}`);
+          continue;
+        }
+        ensureUnchanged();
+        const result = await this.runEngineCommand(['container', 'rm', container.fullId], {
+          timeoutMs: ACTION_TIMEOUT_MS,
+          engineOverride: 'podman',
+        });
+        if (result.success) {
+          removed.push(container.name);
+        } else {
+          firstFailure ??= result;
+          failures.push(`${container.name}: ${(result.stderr || result.stdout || `exit code ${result.exitCode}`).trim()}`);
+        }
+      }
+      ensureUnchanged();
+      if (firstFailure) {
+        return {
+          ...firstFailure,
+          stdout: removed.join('\n'),
+          stderr: `${removed.length} of ${targets.containers.length} containers removed.\n${failures.join('\n')}`,
+        };
+      }
+      const remaining = (await this.composePs(composeFile))
+        .filter((container) => targets.selected.has(container.service));
+      ensureUnchanged();
+      if (remaining.length) {
+        throw new Error('Could not verify removal of all selected Compose service containers.');
+      }
+      return {
+        success: true,
+        stdout: removed.length ? removed.join('\n') : 'No service containers to remove.',
+        stderr: '',
+        exitCode: 0,
+      };
+    }
+    const initialSettings = JSON.stringify(getConfig());
+    const content = fs.readFileSync(composeFile, 'utf-8');
+    const ensureUnchanged = () => {
+      if (JSON.stringify(getConfig()) !== initialSettings ||
+          fs.readFileSync(composeFile, 'utf-8') !== content) {
+        throw new Error('Compose settings or file changed; refresh the project before retrying.');
+      }
+    };
     const statuses = await this.composePs(composeFile, composeDoc);
-    const targets = statuses.filter((c) => services.includes(c.service) && c.fullId);
+    ensureUnchanged();
+    const targets = statuses.filter((c) => services.includes(c.service));
+    if (targets.some((container) => !/^[a-f0-9]{64}$/i.test(container.fullId)) ||
+        new Set(targets.map((container) => container.fullId)).size !== targets.length) {
+      throw new Error('Cannot safely identify the existing Compose containers.');
+    }
     if (targets.length === 0) {
       return {
         success: true,

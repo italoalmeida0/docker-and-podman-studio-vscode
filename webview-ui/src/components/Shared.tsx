@@ -1,4 +1,5 @@
 import React from 'react';
+import { LoaderCircle } from 'lucide-react';
 import { TranslationDict } from '../i18n/en';
 import { useI18n } from '../i18n';
 import { ServiceStatus } from '../store';
@@ -165,10 +166,11 @@ export const ActionPillButton: React.FC<{
       type="button"
       onClick={onClick}
       disabled={disabled || loading}
+      aria-busy={loading}
       title={title}
       className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-all disabled:opacity-40 disabled:cursor-not-allowed ${styles}`}
     >
-      {icon}
+      {loading ? <LoaderCircle className="w-3.5 h-3.5 animate-spin" /> : icon}
       <span>{loading && loadingLabel ? loadingLabel : label}</span>
     </button>
   );
@@ -227,7 +229,7 @@ export const DetailRow: React.FC<{ label: string; value: string | number }> = ({
 }) => (
   <div className="space-y-0.5">
     <div className="text-[11px] font-medium text-text-secondary">{label}</div>
-    <div className="text-xs font-mono text-text-primary break-all">{value || '-'}</div>
+    <div className="text-xs font-mono text-text-primary break-all">{value === '' ? '-' : value}</div>
   </div>
 );
 

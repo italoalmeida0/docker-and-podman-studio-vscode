@@ -1,12 +1,61 @@
 const assert = require('node:assert/strict');
 const { createHash } = require('node:crypto');
 const fs = require('node:fs');
+const Module = require('node:module');
 const path = require('node:path');
 const test = require('node:test');
+const esbuild = require('esbuild');
 const { loadModule, vscode } = require('./podman-harness.cjs');
 
 const root = path.resolve(__dirname, '..');
 const manifest = require('../package.json');
+
+test('the Studio sidebar displays the installed extension version', () => {
+  const webviewRoot = path.join(root, 'webview-ui');
+  const fixture = path.join(webviewRoot, 'sidebar-version-test.cjs');
+  const output = esbuild.buildSync({
+    stdin: {
+      contents: `
+        import React from 'react';
+        import { renderToStaticMarkup } from 'react-dom/server';
+        import { Sidebar } from './src/components/Sidebar';
+        import { useStudioStore } from './src/store';
+
+        export function renderVersion(version) {
+          useStudioStore.getInitialState().settings = version
+            ? { extensionVersion: version }
+            : null;
+          return renderToStaticMarkup(React.createElement(Sidebar));
+        }
+      `,
+      resolveDir: webviewRoot,
+      sourcefile: 'sidebar-version-test.tsx',
+      loader: 'tsx',
+    },
+    bundle: true,
+    platform: 'node',
+    format: 'cjs',
+    write: false,
+    logLevel: 'silent',
+  }).outputFiles[0].text;
+  const instance = new Module(fixture, module);
+  instance.filename = fixture;
+  instance.paths = Module._nodeModulePaths(webviewRoot);
+  const hadNavigator = typeof globalThis.navigator !== 'undefined';
+  if (!hadNavigator) globalThis.navigator = { language: 'en' };
+  try {
+    instance._compile(output, fixture);
+    const footer = (version) => {
+      const html = instance.exports.renderVersion(version);
+      return html.match(/<span class="truncate font-mono text-\[10px\]">([^<]+)<\/span>/)?.[1];
+    };
+    assert.equal(footer(undefined), 'Docker');
+    assert.equal(footer('9.8.7'), 'v9.8.7 · Docker');
+    assert.equal(footer('2.3.4'), 'v2.3.4 · Docker');
+  } finally {
+    if (!hadNavigator) delete globalThis.navigator;
+  }
+});
 
 test('the activity bar and launcher share a theme-compatible brand icon', () => {
   const activityIcon = manifest.contributes.viewsContainers.activitybar.find(

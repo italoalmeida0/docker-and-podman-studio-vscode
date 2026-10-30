@@ -3,17 +3,12 @@ import {
   Box,
   ChevronDown,
   ExternalLink,
-  FileText,
-  Pause,
-  Play,
   Plus,
   RefreshCw,
-  RotateCcw,
   Search,
-  Square,
   Terminal,
-  Trash2,
 } from 'lucide-react';
+import { ContainerCard } from '../components/ContainerCard';
 import { LogViewer } from '../components/LogViewer';
 import {
   isRunningState,
@@ -22,16 +17,16 @@ import {
 } from '../components/PodmanBatchActions';
 import {
   ActionPillButton,
-  DetailRow,
   EmptyState,
   Modal,
   SmallActionButton,
   StatCard,
-  StatusBadge,
 } from '../components/Shared';
+import { buildContainerTree, containerFilterForEngine } from '../containerTree';
 import { useI18n } from '../i18n';
 import { PodmanContainer, useStudioStore } from '../store';
 import { useVsCodeMessaging } from '../vscode';
+import { PodGroups } from './PodsPage';
 
 export const ContainersPage: React.FC = () => {
   const { postMessage } = useVsCodeMessaging();
@@ -53,7 +48,8 @@ export const ContainersPage: React.FC = () => {
   const [search, setSearch] = useState('');
   const [filterTab, setFilterTab] = useState<'all' | 'running' | 'stopped' | 'pod' | 'compose'>('all');
   const [showInfra, setShowInfra] = useState(false);
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [expandedPods, setExpandedPods] = useState<Record<string, boolean>>({});
+  const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({});
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [createMode, setCreateMode] = useState<'simple' | 'advanced'>('simple');
   const [logContainer, setLogContainer] = useState<PodmanContainer | null>(null);
@@ -80,41 +76,28 @@ export const ContainersPage: React.FC = () => {
     [allContainers, showInfra]
   );
 
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return visibleBase.filter((c) => {
-      if (filterTab === 'running' && !isRunningState(c.state)) {
-        return false;
-      }
-      if (filterTab === 'stopped' && (isRunningState(c.state) || c.state === 'paused')) {
-        return false;
-      }
-      if (filterTab === 'pod' && !c.podId) {
-        return false;
-      }
-      if (filterTab === 'compose' && !c.isCompose) {
-        return false;
-      }
-      if (!q) {
-        return true;
-      }
-      return (
-        c.name.toLowerCase().includes(q) ||
-        c.image.toLowerCase().includes(q) ||
-        c.id.toLowerCase().includes(q) ||
-        c.podName.toLowerCase().includes(q) ||
-        c.composeProject.toLowerCase().includes(q)
-      );
-    });
-  }, [visibleBase, search, filterTab]);
+  const activeFilter = containerFilterForEngine(filterTab, engine);
+  const tree = useMemo(
+    () => buildContainerTree(visibleBase, pods, engine, activeFilter, search),
+    [visibleBase, pods, engine, activeFilter, search]
+  );
+  const visiblePods = useMemo(() => tree.podGroups.map((group) => group.pod), [tree.podGroups]);
 
   const selectable = useMemo(
     () => allContainers.filter((c) => !c.isInfra && Boolean(c.fullId)),
     [allContainers]
   );
   const visibleSelectable = useMemo(
-    () => filtered.filter((c) => !c.isInfra && Boolean(c.fullId)),
-    [filtered]
+    () => [
+      ...tree.standalone,
+      ...tree.podGroups.flatMap(({ pod, containers }) =>
+        expandedPods[pod.fullId || pod.id] === false ? [] : containers
+      ),
+      ...tree.composeGroups.flatMap(({ project, containers }) =>
+        expandedProjects[project] === false ? [] : containers
+      ),
+    ].filter((c) => !c.isInfra && Boolean(c.fullId)),
+    [tree, expandedPods, expandedProjects]
   );
   const selection = usePodmanSelection(selectable, visibleSelectable, isPodman);
   const runningCount = visibleBase.filter((c) => isRunningState(c.state)).length;
@@ -155,6 +138,33 @@ export const ContainersPage: React.FC = () => {
     });
     setShowCreateModal(false);
   };
+
+  const renderContainers = (containers: PodmanContainer[], pod?: (typeof pods)[number]) =>
+    containers.map((container) => {
+      const podMember = pod?.containers.find((member) =>
+        member.id && container.fullId &&
+        (container.fullId.startsWith(member.id) || member.id.startsWith(container.fullId))
+      );
+      return (
+        <ContainerCard
+          key={container.fullId || container.id}
+          container={container}
+          busy={busy}
+          selected={selection.selectedIds.has(container.fullId)}
+          onToggleSelection={() => selection.toggle(container.fullId)}
+          onLogs={() => {
+            clearLogs();
+            setLogContainer(container);
+            postMessage('container:logs', {
+              containerId: isPodman ? container.fullId || container.id : container.id,
+              name: container.name,
+            });
+          }}
+          onDelete={() => setDeleteTarget(container)}
+          restartCount={podMember?.restartCount}
+        />
+      );
+    });
 
   return (
     <div className="flex flex-col h-full">
@@ -253,7 +263,7 @@ export const ContainersPage: React.FC = () => {
                   type="button"
                   onClick={() => setFilterTab(id)}
                   className={`px-2.5 py-1 text-xs rounded transition-colors ${
-                    filterTab === id
+                    activeFilter === id
                       ? `${isPodman ? 'bg-accent-purple' : 'bg-accent-blue'} text-white font-medium`
                       : 'text-text-secondary hover:text-text-primary'
                   }`}
@@ -273,8 +283,55 @@ export const ContainersPage: React.FC = () => {
           />
         )}
 
-        {/* List */}
-        {filtered.length === 0 ? (
+        {isPodman && (
+          <PodGroups
+            visiblePods={visiblePods}
+            expandedPods={expandedPods}
+            onTogglePod={(id) => setExpandedPods((previous) => ({
+              ...previous,
+              [id]: previous[id] === false,
+            }))}
+            renderContainers={(pod) => {
+              const group = tree.podGroups.find((item) => item.pod === pod);
+              return group?.containers.length
+                ? renderContainers(group.containers, pod)
+                : <div className="text-xs text-text-muted">{t.common.none}</div>;
+            }}
+          />
+        )}
+
+        {tree.composeGroups.map(({ project, containers }) => {
+          const expanded = expandedProjects[project] !== false;
+          return (
+            <section key={project} className="bg-panel-card border border-panel-border rounded-md overflow-hidden">
+              <button
+                type="button"
+                aria-expanded={expanded}
+                onClick={() => setExpandedProjects((previous) => ({
+                  ...previous,
+                  [project]: previous[project] === false,
+                }))}
+                className="w-full px-4 py-3 flex items-center justify-between gap-3 text-left"
+              >
+                <span className="font-semibold text-sm text-text-primary">
+                  Compose: {project} <span className="text-text-muted">({containers.length})</span>
+                </span>
+                <ChevronDown className={`w-4 h-4 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+              </button>
+              {expanded && (
+                <div className="border-t border-panel-border bg-panel-bg p-4 space-y-2 border-l-2">
+                  {renderContainers(containers)}
+                </div>
+              )}
+            </section>
+          );
+        })}
+
+        {tree.standalone.length > 0 && (
+          <div className="space-y-2.5">{renderContainers(tree.standalone)}</div>
+        )}
+
+        {tree.filtered.length === 0 && tree.podGroups.length === 0 && (
           <EmptyState
             icon={<Box className="w-8 h-8" />}
             title={t.containers.emptyTitle}
@@ -288,158 +345,6 @@ export const ContainersPage: React.FC = () => {
               />
             }
           />
-        ) : (
-          <div className="space-y-2.5">
-            {filtered.map((c) => {
-              const isOpen = Boolean(expanded[c.id]);
-              const isRunning = isRunningState(c.state);
-              const isPaused = c.state === 'paused';
-              const isProtectedInfra = isPodman && c.isInfra;
-              const targetId = isPodman ? c.fullId || c.id : c.id;
-              return (
-                <div
-                  key={c.fullId || c.id}
-                  className="bg-panel-card border border-panel-border rounded-md overflow-hidden shadow-card"
-                >
-                  <div className="px-4 py-3 flex items-center justify-between gap-4 flex-wrap">
-                    {isPodman && !c.isInfra && c.fullId && (
-                      <input
-                        type="checkbox"
-                        aria-label={fmt(t.common.selectResource, { name: c.name })}
-                        checked={selection.selectedIds.has(c.fullId)}
-                        disabled={busy}
-                        onChange={() => selection.toggle(c.fullId)}
-                      />
-                    )}
-                    <div
-                      className="flex items-center gap-3 min-w-0 flex-1 cursor-pointer"
-                      onClick={() => setExpanded((prev) => ({ ...prev, [c.id]: !prev[c.id] }))}
-                    >
-                      <StatusBadge status={c.state} />
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="font-semibold text-sm text-text-primary truncate">
-                            {c.name}
-                          </span>
-                          <span className="text-xs font-mono text-text-muted">{c.id}</span>
-                          {c.podName && (
-                            <span className="px-2 py-0.5 text-[10px] rounded bg-purple-500/15 text-accent-purple border border-accent-purple font-mono">
-                              {fmt(t.compose.podBadge, { name: c.podName })}
-                            </span>
-                          )}
-                          {c.isCompose && (
-                            <span className="px-2 py-0.5 text-[10px] rounded bg-panel-bg border border-panel-border text-text-secondary font-mono">
-                              compose:{c.composeProject}/{c.composeService}
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-xs text-text-secondary mt-0.5 truncate font-mono">
-                          {c.image} {c.ports ? `· ${c.ports}` : ''}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <SmallActionButton
-                        label={t.common.start}
-                        accent
-                        disabled={busy || isProtectedInfra || isRunning || isPaused}
-                        icon={<Play className="w-3 h-3" />}
-                        onClick={() => postMessage('container:start', { containerId: targetId })}
-                      />
-                      <SmallActionButton
-                        label={t.common.stop}
-                        disabled={busy || isProtectedInfra || !isRunning || c.state === 'stopping'}
-                        icon={<Square className="w-3 h-3" />}
-                        onClick={() => postMessage('container:stop', { containerId: targetId })}
-                      />
-                      <SmallActionButton
-                        label={t.common.restart}
-                        disabled={busy || isProtectedInfra || isPaused || c.state === 'stopping'}
-                        icon={<RotateCcw className="w-3 h-3" />}
-                        onClick={() => postMessage('container:restart', { containerId: targetId })}
-                      />
-                      <SmallActionButton
-                        label={t.common.terminal}
-                        disabled={isProtectedInfra || !['running', 'unhealthy', 'starting'].includes(c.state)}
-                        icon={<Terminal className="w-3 h-3" />}
-                        onClick={() =>
-                          postMessage('container:terminal', { containerId: targetId, name: c.name })
-                        }
-                      />
-                      {isPodman && !c.isInfra && (
-                        <SmallActionButton
-                          label={isPaused ? t.common.resume : t.common.pause}
-                          disabled={busy || (!isPaused && !isRunning)}
-                          icon={isPaused ? <Play className="w-3 h-3" /> : <Pause className="w-3 h-3" />}
-                          onClick={() =>
-                            postMessage(isPaused ? 'container:unpause' : 'container:pause', {
-                              containerId: c.fullId,
-                            })
-                          }
-                        />
-                      )}
-                      <SmallActionButton
-                        label={t.common.logs}
-                        icon={<FileText className="w-3 h-3" />}
-                        onClick={() => {
-                          clearLogs();
-                          setLogContainer(c);
-                          postMessage('container:logs', { containerId: targetId, name: c.name });
-                        }}
-                      />
-                      <SmallActionButton
-                        label={t.common.delete}
-                        danger
-                        disabled={busy || isProtectedInfra}
-                        icon={<Trash2 className="w-3 h-3" />}
-                        onClick={() => setDeleteTarget(c)}
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setExpanded((prev) => ({ ...prev, [c.id]: !prev[c.id] }))}
-                        className="p-1.5 rounded border border-panel-border text-text-secondary hover:text-text-primary"
-                      >
-                        <ChevronDown
-                          className={`w-4 h-4 transition-transform ${isOpen ? 'rotate-180' : ''}`}
-                        />
-                      </button>
-                    </div>
-                  </div>
-
-                  {isOpen && (
-                    <div className="border-t border-panel-border bg-panel-bg px-4 py-4 grid grid-cols-3 gap-3">
-                      <DetailRow label={t.containers.detailContainerId} value={c.fullId} />
-                      <DetailRow label={t.containers.detailStatus} value={c.status} />
-                      <DetailRow label={t.containers.detailCreatedAt} value={c.created} />
-                      <DetailRow
-                        label={t.containers.detailPorts}
-                        value={c.ports || t.containers.noPublishedPorts}
-                      />
-                      <DetailRow
-                        label={t.containers.detailNetworks}
-                        value={c.networks.join(', ') || t.common.default}
-                      />
-                      <DetailRow label={t.containers.detailCommand} value={c.command || '-'} />
-                      <DetailRow
-                        label={t.containers.detailPod}
-                        value={
-                          c.podName
-                            ? `${c.podName} (${c.podId.slice(0, 12)})`
-                            : t.common.standalone
-                        }
-                      />
-                      <DetailRow
-                        label={t.containers.detailMounts}
-                        value={c.mounts.join(', ') || t.common.none}
-                      />
-                      <DetailRow label={t.containers.detailComposeYaml} value={c.composeFile || '-'} />
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
         )}
       </div>
 
