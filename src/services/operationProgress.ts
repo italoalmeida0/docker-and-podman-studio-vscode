@@ -3,11 +3,13 @@ import {
   OperationEvent,
   OperationSnapshot,
 } from '../shared/operationFeedback';
+import type { SupportedLocale } from '../config';
 
 interface ActiveOperation {
   id: string;
   key: string;
   label: string;
+  labelLocale?: SupportedLocale;
   startedAt: number;
   output: string;
   outputTruncated: boolean;
@@ -29,10 +31,10 @@ export class OperationProgress {
     private readonly writeOutput: (text: string) => void
   ) {}
 
-  public start(key: string, label: string): string {
+  public start(key: string, label: string, labelLocale?: SupportedLocale): string {
     const id = String(++this.nextId);
     const operation: ActiveOperation = {
-      id, key, label, startedAt: Date.now(), output: '', outputTruncated: false,
+      id, key, label, labelLocale, startedAt: Date.now(), output: '', outputTruncated: false,
       pendingOutput: '',
     };
     this.active.set(id, operation);
@@ -107,6 +109,7 @@ export class OperationProgress {
       id: operation.id,
       key: operation.key,
       label: operation.label,
+      labelLocale: operation.labelLocale,
       elapsedMs: now - operation.startedAt,
       output: operation.output,
       outputTruncated: operation.outputTruncated,

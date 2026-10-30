@@ -134,7 +134,8 @@ test('Compose replica log streams close independently and stop together', async 
     '[app-1] replica-one', '[app-2] replica-two', '[app-2] connection failed', '[app-3] replica-three',
   ]);
   assert.equal(errors.length, 1);
-  assert.match(errors[0], /connection failed/);
+  assert.deepEqual({ key: errors[0].key, source: errors[0].source }, { key: 'app', source: 'app-2' });
+  assert.match(errors[0].message, /connection failed/);
 });
 
 test('cancelling pending replica logs terminates every process', async (t) => {
@@ -159,7 +160,53 @@ test('reports unexpected log stream failures with stderr', (t) => {
   child.stderr.emit('data', Buffer.from('connection failed\n'));
   child.emit('close', 125, null);
   assert.equal(errors.length, 1);
-  assert.match(errors[0], /example.*connection failed/i);
+  assert.deepEqual({ key: errors[0].key, source: errors[0].source }, { key: 'example', source: 'example' });
+  assert.match(errors[0].message, /example.*connection failed/i);
+});
+
+test('log recovery is scoped to the stream and replica that actually recovered', async (t) => {
+  const first = fakeChild();
+  const second = fakeChild();
+  const retried = fakeChild();
+  let invocation = 0;
+  const provider = new LogProvider({
+    streamComposeLogs: async () => ++invocation === 1
+      ? [{ process: first, containerName: 'app-1' }, { process: second, containerName: 'app-2' }]
+      : [{ process: retried, containerName: 'app-1' }],
+  });
+  t.after(() => provider.dispose());
+  const errors = [];
+  const recoveries = [];
+  provider.onError((error) => errors.push(error));
+  provider.onRecovery((target) => recoveries.push(target));
+  await provider.startComposeStreaming('compose.yaml', 'app', { key: 'project-one' });
+  first.stderr.emit('data', Buffer.from('broken one\n'));
+  second.stderr.emit('data', Buffer.from('broken two\n'));
+  first.emit('close', 1, null);
+  second.emit('close', 1, null);
+  assert.deepEqual(errors.map(({ key, source }) => ({ key, source })), [
+    { key: 'project-one', source: 'app-1' },
+    { key: 'project-one', source: 'app-2' },
+  ]);
+  assert.deepEqual(recoveries, [], 'stderr is not proof of recovery');
+  await provider.startComposeStreaming('compose.yaml', 'app', { key: 'project-one' });
+  retried.stdout.emit('data', Buffer.from('ready\n'));
+  retried.stdout.emit('data', Buffer.from('still ready\n'));
+  retried.emit('close', 0, null);
+  assert.deepEqual(recoveries, [{ key: 'project-one', source: 'app-1', engine: 'podman' }]);
+});
+
+test('log failures retain the engine that started the stream', (t) => {
+  const child = fakeChild();
+  const provider = new LogProvider({ streamContainerLogs: () => child });
+  t.after(() => provider.dispose());
+  const errors = [];
+  provider.onError((error) => errors.push(error));
+  provider.startContainerStreaming('example');
+  config.engine = 'docker';
+  child.emit('close', 1, null);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].engine, 'podman');
 });
 
 test('removes Compose ANSI colors before parsing log prefixes', (t) => {
@@ -336,16 +383,25 @@ test('deduplicates polling errors until a successful refresh', async (t) => {
   }, { parse: () => ({}) });
   t.after(() => provider.dispose());
   const errors = [];
+  const recoveries = [];
   provider.onError((message) => errors.push(message));
+  provider.onRecovery(() => recoveries.push(true));
   provider.startPolling(file, 60_000);
   await tick();
   await provider.poll();
   assert.deepEqual(errors, ['Podman unavailable']);
   failing = false;
   await provider.poll();
+  assert.equal(recoveries.length, 1);
   failing = true;
   await provider.poll();
   assert.deepEqual(errors, ['Podman unavailable', 'Podman unavailable']);
+  config.engine = 'docker';
+  provider.startPolling(file, 60_000);
+  assert.equal(recoveries.length, 2, 'changing context clears the previous polling failure');
+  await tick();
+  provider.clearActiveFile();
+  assert.equal(recoveries.length, 3, 'closing the active project clears its polling failure');
 });
 
 test('a removed Compose file clears stale status, reports the file and recovers', async (t) => {
@@ -441,7 +497,8 @@ test('native Compose down confirms deletion and marks a failed command as failed
     return item;
   };
   let choice;
-  vscode.window.showWarningMessage = async () => choice;
+  const warnings = [];
+  vscode.window.showWarningMessage = async (message) => { warnings.push(message); return choice; };
   const errors = [];
   const output = [];
   vscode.window.showErrorMessage = async (message) => { errors.push(message); };
@@ -469,9 +526,10 @@ test('native Compose down confirms deletion and marks a failed command as failed
   assert.match(output.join('\n'), /provider failed/);
   assert.match(statusItems[1].text, /\$\(error\)/);
   await manager.handleComposeAction('stop', { fsPath: 'compose.yaml' });
-  assert.match(errors[1], /1 of 3 items succeeded/i);
-  assert.match(errors[1], /may still be running/i);
-  assert.doesNotMatch(errors[1], /provider timed out/);
+  assert.equal(errors.length, 1);
+  assert.match(warnings.at(-1), /1 of 3 items succeeded/i);
+  assert.match(warnings.at(-1), /may still be running/i);
+  assert.doesNotMatch(warnings.at(-1), /provider timed out/);
   assert.match(output.join('\n'), /provider timed out/);
 });
 

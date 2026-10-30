@@ -22,6 +22,9 @@ test('failure summaries distinguish common problems without exposing the full lo
   const cases = [
     ['execution timed out (300s)', undefined, 'timeout'],
     ['spawn podman ENOENT', 'ENOENT', 'missingExecutable'],
+    ['spawn podman ENOENT', undefined, 'missingExecutable'],
+    ["ENOENT: no such file or directory, open 'compose.yaml'", 'ENOENT', 'missingFile'],
+    ["Error: ENOENT: no such file or directory, stat 'compose.yaml'", undefined, 'missingFile'],
     ['no space left on device', undefined, 'diskSpace'],
     ['bind: address already in use', undefined, 'portInUse'],
     ['Registry HTTP 401', undefined, 'registryAuth'],
@@ -29,6 +32,11 @@ test('failure summaries distinguish common problems without exposing the full lo
     ['manifest unknown', undefined, 'imageNotFound'],
     ['unable to connect to Podman', undefined, 'engineConnection'],
     ['Registry request timed out after 20 seconds.', undefined, 'network'],
+    ['getaddrinfo ENOTFOUND registry.example', undefined, 'network'],
+    ['connect ECONNREFUSED 127.0.0.1:1234', undefined, 'network'],
+    ['Client network socket disconnected before secure TLS connection was established', 'ECONNRESET', 'network'],
+    ['temporary connection error', 'EAI_AGAIN', 'network'],
+    ['connect ETIMEDOUT 127.0.0.1:1234', undefined, 'timeout'],
     ['unexpected provider response', undefined, 'generic'],
   ];
   for (const [message, code, expected] of cases) {
@@ -197,6 +205,7 @@ test('configured timeout covers mutations and validates its exact range', async 
     if (previous === undefined) delete config.longOperationTimeoutMinutes;
     else config.longOperationTimeoutMinutes = previous;
   });
+
   const service = new PodmanService();
   const calls = [];
   service.runEngineCommand = async (args, options) => {
@@ -223,6 +232,37 @@ test('configured timeout covers mutations and validates its exact range', async 
     await service.pullImage('image');
     assert.equal(calls.at(-1).options.timeoutMs, valid * 60_000);
   }
+});
+
+test('short engine, Compose and registry commands use a 30-second limit', async (t) => {
+  const previous = { ...config };
+  t.after(() => {
+    for (const key of Object.keys(config)) delete config[key];
+    Object.assign(config, previous);
+  });
+  Object.assign(config, { engine: 'podman', composePath: '', composeCommandStyle: 'auto' });
+  const service = new PodmanService();
+  const calls = [];
+  service.spawnProcess = async (bin, args, options) => {
+    calls.push({ bin, args, options });
+    return { success: true, stdout: 'podman-compose version 1\n', stderr: '', exitCode: 0 };
+  };
+  await service.runEngineCommand(['info']);
+  await service.getComposeVersionString('podman');
+  await service.loginRegistry('registry.example', 'user', 'secret');
+  await service.logoutRegistry('registry.example');
+  await service.useDockerContext('desktop');
+  assert.equal(calls.length, 5);
+  assert.ok(calls.every(({ options }) => options.timeoutMs === 30_000));
+  assert.equal(calls[2].options.stdin, 'secret');
+
+  let composeTimeout;
+  service.runComposeCommand = async (_file, _args, timeoutMs) => {
+    composeTimeout = timeoutMs;
+    return { success: true, stdout: 'services: {}\n', stderr: '', exitCode: 0 };
+  };
+  await service.resolveComposeDocument(path.resolve('compose.yaml'));
+  assert.equal(composeTimeout, 30_000);
 });
 
 test('batch progress reports the actual item count even after a failure', async () => {

@@ -47,7 +47,7 @@ test('the Studio sidebar displays the installed extension version', () => {
     instance._compile(output, fixture);
     const footer = (version) => {
       const html = instance.exports.renderVersion(version);
-      return html.match(/<span class="truncate font-mono text-\[10px\]">([^<]+)<\/span>/)?.[1];
+      return html.match(/<span class="[^"]*\btruncate font-mono text-\[10px\]">([^<]+)<\/span>/)?.[1];
     };
     assert.equal(footer(undefined), 'Docker');
     assert.equal(footer('9.8.7'), 'v9.8.7 · Docker');

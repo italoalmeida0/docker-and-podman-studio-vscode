@@ -34,11 +34,22 @@ export interface StudioMessage<T = any> {
 
 export function createEngineMessageGate() {
   const pending = new Map<string, StudioMessage>();
+  let nextUnscopedFeedback = 0;
   return {
     shouldHandle(message: StudioMessage, engine: 'docker' | 'podman', settingsLoaded: boolean): boolean {
       if (!message.engine) return true;
       if (!settingsLoaded) {
-        pending.set(`${message.engine}\0${message.command}`, message);
+        let key = `${message.engine}\0${message.command}`;
+        if (message.command === 'error' || message.command === 'error:resolved') {
+          const scope = typeof message.payload?.scope === 'string' ? message.payload.scope : undefined;
+          key = scope
+            ? `${message.engine}\0feedback\0${scope}`
+            : `${key}\0${++nextUnscopedFeedback}`;
+          pending.delete(key);
+        } else if (message.command === 'notification') {
+          key += `\0${++nextUnscopedFeedback}`;
+        }
+        pending.set(key, message);
         return false;
       }
       return message.engine === engine;

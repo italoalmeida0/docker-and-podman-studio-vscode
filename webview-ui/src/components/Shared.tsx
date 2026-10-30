@@ -91,14 +91,16 @@ export function getStatusTheme(status: ServiceStatus | string, t?: TranslationDi
   }
 }
 
-export const StatusBadge: React.FC<{ status: ServiceStatus | string; customLabel?: string }> = ({
+export const StatusBadge: React.FC<{ status: ServiceStatus | string; customLabel?: string; title?: string }> = ({
   status,
   customLabel,
+  title,
 }) => {
   const { t } = useI18n();
   const s = getStatusTheme(status, t);
   return (
     <span
+      title={title}
       className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium border ${s.border} ${s.text} ${s.badgeBg}`}
     >
       <span className={`w-1.5 h-1.5 rounded-full ${s.dot} ${s.pulse ? 'animate-pulse' : ''}`} />
@@ -169,10 +171,10 @@ export const ActionPillButton: React.FC<{
       disabled={disabled || loading}
       aria-busy={loading}
       title={title}
-      className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-all disabled:opacity-40 disabled:cursor-not-allowed ${styles}`}
+      className={`inline-flex max-w-full items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-all disabled:opacity-40 disabled:cursor-not-allowed ${styles}`}
     >
       {loading ? <LoaderCircle className="w-3.5 h-3.5 animate-spin" /> : icon}
-      <span>{loading && loadingLabel ? loadingLabel : label}</span>
+      <span className="min-w-0 break-words">{loading && loadingLabel ? loadingLabel : label}</span>
     </button>
   );
 };
@@ -191,7 +193,7 @@ export const SmallActionButton: React.FC<{
     onClick={onClick}
     disabled={disabled}
     title={title}
-    className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg border transition-colors ${
+    className={`inline-flex max-w-full items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg border transition-colors ${
       danger
         ? 'border-rose-500/20 text-rose-400 hover:bg-rose-500/15'
         : accent
@@ -200,7 +202,7 @@ export const SmallActionButton: React.FC<{
     } disabled:opacity-30 disabled:cursor-not-allowed`}
   >
     {icon}
-    <span>{label}</span>
+    <span className="min-w-0 break-words">{label}</span>
   </button>
 );
 
@@ -270,14 +272,14 @@ export const Modal: React.FC<{
       role="dialog"
       aria-modal="true"
       aria-label={title}
-      className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-6"
+      className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-2 sm:p-6"
       onClick={onClose}
     >
       <div
-        className={`w-full ${maxWidth} max-h-[88vh] flex flex-col bg-panel-card border border-panel-border rounded-xl shadow-elevated overflow-hidden`}
+        className={`w-full ${maxWidth} max-h-[calc(100vh-1rem)] sm:max-h-[88vh] flex flex-col bg-panel-card border border-panel-border rounded-xl shadow-elevated overflow-hidden`}
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="px-5 py-4 border-b border-panel-border flex items-start justify-between gap-4 shrink-0">
+        <div className="px-4 sm:px-5 py-3 sm:py-4 border-b border-panel-border flex items-start justify-between gap-4 shrink-0 max-h-[30vh] overflow-auto">
           <div>
             <h3 className="text-base font-semibold tracking-tight text-text-primary">{title}</h3>
             {subtitle && <p className="text-xs text-text-secondary mt-1">{subtitle}</p>}
@@ -291,11 +293,11 @@ export const Modal: React.FC<{
           </button>
         </div>
         {feedback && <FeedbackCenter />}
-        <div className="p-5 overflow-auto flex-1">
+        <div className="p-4 sm:p-5 overflow-auto flex-1 min-h-0">
           <fieldset disabled={lockFields} className="min-w-0 space-y-4">{children}</fieldset>
         </div>
         {footer && (
-          <div className="px-5 py-3 border-t border-panel-border flex items-center justify-end gap-2 bg-panel-bg shrink-0">
+          <div className="px-4 sm:px-5 py-3 border-t border-panel-border flex items-center justify-end gap-2 flex-wrap bg-panel-bg shrink-0 max-h-[25vh] overflow-auto">
             {footer}
           </div>
         )}

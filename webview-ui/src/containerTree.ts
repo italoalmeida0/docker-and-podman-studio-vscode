@@ -1,4 +1,4 @@
-import { ContainerEngine, PodmanContainer, PodmanPod } from './store';
+import { ContainerEngine, PodmanContainer, PodmanPod, ServiceStatus } from './store';
 import { isRunningState } from './components/PodmanBatchActions';
 
 export type ContainerFilter = 'all' | 'running' | 'stopped' | 'pod' | 'compose';
@@ -12,9 +12,31 @@ export function containerFilterForEngine(
 
 export interface ContainerTree {
   filtered: PodmanContainer[];
-  podGroups: Array<{ pod: PodmanPod; containers: PodmanContainer[] }>;
-  composeGroups: Array<{ project: string; containers: PodmanContainer[] }>;
+  podGroups: Array<{ pod: PodmanPod; containers: PodmanContainer[]; status: ServiceStatus }>;
+  composeGroups: Array<{ project: string; containers: PodmanContainer[]; status: ServiceStatus }>;
   standalone: PodmanContainer[];
+}
+
+const STATUS_PRIORITY: Record<ServiceStatus, number> = {
+  running: 0,
+  stopped: 1,
+  starting: 2,
+  stopping: 3,
+  paused: 4,
+  restarting: 5,
+  exited: 6,
+  unhealthy: 7,
+};
+
+export function mostAttentionStatus(
+  states: readonly ServiceStatus[],
+  fallback?: ServiceStatus
+): ServiceStatus {
+  const initial = fallback ?? states[0] ?? 'stopped';
+  return states.reduce<ServiceStatus>(
+    (worst, state) => STATUS_PRIORITY[state] > STATUS_PRIORITY[worst] ? state : worst,
+    initial
+  );
 }
 
 export function buildContainerTree(
@@ -22,7 +44,8 @@ export function buildContainerTree(
   pods: PodmanPod[],
   engine: ContainerEngine,
   filter: ContainerFilter,
-  search: string
+  search: string,
+  allMembers: PodmanContainer[] = containers
 ): ContainerTree {
   const query = search.trim().toLowerCase();
   const byPodId = new Map<string, PodmanPod>();
@@ -60,6 +83,18 @@ export function buildContainerTree(
   });
 
   const groupedPods = new Map(pods.map((pod) => [pod, [] as PodmanContainer[]]));
+  const allPodMembers = new Map(pods.map((pod) => [pod, [] as PodmanContainer[]]));
+  const allComposeMembers = new Map<string, PodmanContainer[]>();
+  for (const container of allMembers) {
+    const pod = findPod(container);
+    if (pod) {
+      allPodMembers.get(pod)?.push(container);
+    } else if (container.isCompose && container.composeProject) {
+      const group = allComposeMembers.get(container.composeProject) || [];
+      group.push(container);
+      allComposeMembers.set(container.composeProject, group);
+    }
+  }
   const occupiedPods = new Set(containers.map(findPod).filter((pod): pod is PodmanPod => Boolean(pod)));
   const groupedCompose = new Map<string, PodmanContainer[]>();
   const standalone: PodmanContainer[] = [];
@@ -81,7 +116,13 @@ export function buildContainerTree(
         const hasVisibleMembers = occupiedPods.has(pod);
         const showEmpty = !hasVisibleMembers && filter !== 'compose' &&
           matchesState(pod.state) && podMatches(pod);
-        return members.length || showEmpty ? [{ pod, containers: members }] : [];
+        const all = allPodMembers.get(pod) || [];
+        const unmatchedStates = pod.containers?.flatMap((member) =>
+          member.state && !all.some((container) => member.id && [container.id, container.fullId].some((id) =>
+            id && (id.startsWith(member.id) || member.id.startsWith(id))))
+            ? [member.state] : []) || [];
+        const status = mostAttentionStatus([...all.map((container) => container.state), ...unmatchedStates], pod.state);
+        return members.length || showEmpty ? [{ pod, containers: members, status }] : [];
       })
     : [];
   return {
@@ -90,6 +131,7 @@ export function buildContainerTree(
     composeGroups: [...groupedCompose].map(([project, members]) => ({
       project,
       containers: members,
+      status: mostAttentionStatus((allComposeMembers.get(project) || []).map((container) => container.state), 'running'),
     })),
     standalone,
   };

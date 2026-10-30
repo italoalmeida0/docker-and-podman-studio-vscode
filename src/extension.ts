@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'async_hooks';
 import * as fs from 'fs';
 import * as https from 'https';
 import * as path from 'path';
@@ -24,14 +25,23 @@ import {
 import { ComposeDiagnosticsProvider } from './language/diagnosticsProvider';
 import { ComposeFileDetector, mergeComposeFileList } from './services/composeDetector';
 import { assertComposeEditBase, composeEditStatuses } from './services/composeEdit';
+import { FeedbackAttempt, FeedbackAttemptTracker } from './services/feedbackAttempts';
 import { LogProvider } from './services/logProvider';
 import { OperationProgress } from './services/operationProgress';
 import { PodmanService } from './services/podmanService';
+import { RefreshCoordinator } from './services/refreshCoordinator';
+import { ResourceLoadErrors } from './services/resourceLoadErrors';
+import { ResourceSnapshotCache } from './services/resourceSnapshotCache';
+import { ScopedErrorTracker } from './services/scopedErrorTracker';
+import { BatchErrorTracker, BatchRecovery } from './services/batchErrorTracker';
 import { StatusProvider } from './services/statusProvider';
 import { YamlService } from './services/yamlService';
 import { buildComposeDocument, serializeComposeBuilder } from './shared/composeBuilder';
 import { composeLogKey } from './shared/composeLogs';
+import { failureSeverity, FailurePresentation, formatFailureSummary } from './shared/failureMessages';
+import { feedbackScope } from './shared/feedbackScope';
 import { appendOutputTail, OperationEvent } from './shared/operationFeedback';
+import { getErrorDetails, UserFacingError } from './shared/userFacingError';
 import {
   InboundCommand as M,
   OutboundCommand as A,
@@ -42,7 +52,7 @@ import {
   ResourceRemovalTarget,
   ServiceStatus,
 } from './types';
-import { summarizeFailure } from './ui/messageUtil';
+import { createFailurePresentation } from './ui/messageUtil';
 import { StatusBarManager, withStatus } from './ui/statusBarManager';
 import {
   StudioLauncherViewProvider,
@@ -51,6 +61,11 @@ import {
 import { NativeCommandsManager } from './wizards/nativeWizards';
 
 const ACTIVE_STATES = new Set(['running', 'unhealthy', 'starting', 'stopping', 'restarting']);
+const ENGINE_INDEPENDENT_FEEDBACK = new Set<string>([
+  M.COMPOSE_FILE_CREATE, M.COMPOSE_FILE_PICK, M.COMPOSE_DIRECTORY_PICK, M.COMPOSE_FILES_LIST,
+  M.SETTINGS_SET_ENGINE, M.SETTINGS_SET_LANGUAGE, M.SETTINGS_SAVE, M.SETTINGS_RESET_PATHS,
+  M.OPEN_EXTERNAL, M.OPEN_VSCODE_SETTINGS, M.OUTPUT_SHOW, M.OUTPUT_COPY,
+]);
 
 function isActiveComposeStatus(status: ServiceStatus, engine: ContainerEngine): boolean {
   return ACTIVE_STATES.has(status) || status === 'paused';
@@ -107,11 +122,30 @@ export async function disconnectRegistryCredentials(
   await secrets.delete(SECRET_KEY);
 }
 
+export async function registerCreatedComposeFile(
+  detector: Pick<ComposeFileDetector, 'registerFile'>,
+  file: string
+): Promise<void> {
+  try {
+    await detector.registerFile(file);
+  } catch (error) {
+    throw new UserFacingError(
+      'composeRegistrationFailed', { path: file }, 'generic', getErrorDetails(error)
+    );
+  }
+}
+
+export function composeRegistrationScope(file: string): string {
+  const normalized = path.normalize(file);
+  const identity = process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+  return feedbackScope('global', 'compose:file:register', undefined, { file: identity });
+}
+
 export function httpGetJson(
   url: string,
   headers: Record<string, string> = {},
   signal?: AbortSignal,
-  timeoutMs = 20_000
+  timeoutMs = 30_000
 ): Promise<any> {
   return new Promise((resolve, reject) => {
     let deadline: ReturnType<typeof setTimeout> | undefined;
@@ -172,6 +206,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     (command, payload) => studioPanel.postMessage({ command, payload }),
     (text) => output.append(text)
   );
+  const refreshCoordinator = new RefreshCoordinator(progress);
+  const resourceLoadErrors = new ResourceLoadErrors();
+  const resourceSnapshots = new ResourceSnapshotCache();
+  const composeStateErrors = new ScopedErrorTracker();
+  const composeFileErrors = new ScopedErrorTracker();
+  const batchErrors = new BatchErrorTracker();
+  const feedbackAttempts = new FeedbackAttemptTracker();
+  const messageFeedback = new AsyncLocalStorage<FeedbackAttempt>();
 
   let activeComposeFile: string | undefined;
   let activeComposeWatchers: vscode.FileSystemWatcher[] = [];
@@ -186,10 +228,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   let refreshGeneration = 0;
   let imageSearchGeneration = 0;
   let imageSearchController: AbortController | undefined;
-  let lastRefreshError = '';
   let settingsWriteDepth = 0;
+  let observedFeedbackContext = '';
+  let feedbackContextRevision = 0;
   let configChangeGeneration = 0;
   let configRefreshPending = false;
+  let resourceConfigRefreshPending = false;
   let configRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   const listGenerations = new Map<string, number>();
   const composeOptionsKey = 'composeProjectOptions';
@@ -227,28 +271,149 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     ]);
   }
 
+  function feedbackContextKey(): string {
+    const context = engineContextKey();
+    if (context !== observedFeedbackContext) {
+      observedFeedbackContext = context;
+      feedbackContextRevision++;
+    }
+    return JSON.stringify([context, feedbackContextRevision]);
+  }
+
+  function isCurrentFeedback(attempt = messageFeedback.getStore()): boolean {
+    return !attempt || feedbackAttempts.isCurrent(attempt, feedbackContextKey());
+  }
+
+  function feedbackEngine(attempt?: FeedbackAttempt): ContainerEngine | undefined {
+    if (attempt?.engineIndependent) return undefined;
+    return attempt?.engine ?? getConfig().engine;
+  }
+
+  function postCurrentFeedback(command: string, payload: unknown): void {
+    if (isCurrentFeedback()) {
+      studioPanel.postMessage({ command, payload, engine: feedbackEngine(messageFeedback.getStore()) });
+    }
+  }
+
   function boundedDetails(details: string): string {
     const tail = appendOutputTail('', details);
     return tail.truncated ? `${bt('detailsTruncated')}\n\n${tail.text}` : tail.text;
   }
 
-  function reportError(error: unknown, operation?: string, errorCode?: string, summary?: string): void {
+  function reportError(
+    error: unknown,
+    operation?: string,
+    errorCode?: string,
+    scope?: string,
+    options?: {
+      progress?: { completed?: number; total?: number };
+      resourceRefresh?: boolean;
+      settingsSavedLogin?: string;
+      operationKey?: string;
+      operationLocale?: ReturnType<typeof resolveBackendLocale>;
+      engine?: ContainerEngine;
+      engineIndependent?: boolean;
+    }
+  ): FailurePresentation {
     const message = error instanceof Error ? error.message : String(error);
-    const details = error instanceof Error ? error.stack || message : message;
-    const userMessage = summary || summarizeFailure(message, errorCode, operation);
+    const details = getErrorDetails(error);
+    const code = errorCode || (error instanceof Error && 'code' in error &&
+      typeof error.code === 'string' ? error.code : undefined);
+    const locale = resolveBackendLocale();
+    const presentation = createFailurePresentation(
+      message, code, operation, options?.progress, options?.operationLocale
+    );
+    if (options?.operationKey) presentation.operationKey = options.operationKey;
+    if (error instanceof UserFacingError) presentation.kind = error.kind;
+    if (options?.resourceRefresh) presentation.resourceRefresh = true;
+    if (options?.settingsSavedLogin) presentation.settingsSavedLogin = options.settingsSavedLogin;
+    if (error instanceof UserFacingError) presentation.direct = error.presentation;
+    const userMessage = formatFailureSummary(locale, presentation);
+    const attempt = scope === undefined ? messageFeedback.getStore() : undefined;
+    const errorScope = scope || attempt?.scope;
     output.appendLine(`[${new Date().toISOString()}] ${operation ? `${operation}:\n` : ''}${details}`);
+    if ((attempt && !isCurrentFeedback(attempt)) ||
+        (options?.engine && options.engine !== getConfig().engine)) return presentation;
+    const engine = options?.engine ?? (options?.engineIndependent ? undefined : feedbackEngine(attempt));
     studioPanel.postMessage({
-      command: A.ERROR,
-      payload: { message: userMessage, details: boundedDetails(details) },
+      command: A.ERROR, engine,
+      payload: { message: userMessage, details: boundedDetails(details), scope: errorScope, failure: presentation },
     });
     if (!studioPanel.isVisible()) {
       const openOutput = bt('openOperationOutput');
-      void Promise.resolve(vscode.window.showErrorMessage(userMessage, openOutput)).then((choice) => {
+      const notification = failureSeverity(presentation) === 'warning'
+        ? vscode.window.showWarningMessage(userMessage, openOutput)
+        : vscode.window.showErrorMessage(userMessage, openOutput);
+      void Promise.resolve(notification).then((choice) => {
         if (choice === openOutput) output.show(true);
       }).catch((failure: unknown) => {
         output.appendLine(`[${new Date().toISOString()}] Could not show error details: ${String(failure)}`);
       });
     }
+    return presentation;
+  }
+
+  function resolveError(scope?: string, engine?: ContainerEngine | null): void {
+    const attempt = scope === undefined ? messageFeedback.getStore() : undefined;
+    if (attempt && !isCurrentFeedback(attempt)) return;
+    const resolvedScope = scope ?? attempt?.scope;
+    if (resolvedScope) {
+      studioPanel.postMessage({
+        command: A.ERROR_RESOLVED,
+        payload: { scope: resolvedScope },
+        engine: engine === null ? undefined : engine ?? feedbackEngine(attempt),
+      });
+    }
+  }
+
+  async function registerCreatedFileWithFeedback(file: string): Promise<void> {
+    const scope = composeRegistrationScope(file);
+    const attempt = feedbackAttempts.start(scope, getConfig().engine, feedbackContextKey(), true);
+    try {
+      await registerCreatedComposeFile(fileDetector, file);
+    } catch (error) {
+      if (isCurrentFeedback(attempt)) {
+        reportError(error, undefined, undefined, scope, { engineIndependent: true });
+      } else {
+        output.appendLine(`[${new Date().toISOString()}] ${getErrorDetails(error)}`);
+      }
+      throw error;
+    } finally {
+      feedbackAttempts.finish(attempt);
+    }
+  }
+
+  function resolveComposeStateError(kind: string): void {
+    const engineIndependent = kind === 'read' || kind === 'watch';
+    const scope = (engineIndependent ? composeFileErrors : composeStateErrors).resolve(kind);
+    if (scope) resolveError(scope, engineIndependent ? null : undefined);
+  }
+
+  function reportComposeStateError(kind: string, file: string | undefined, error: unknown): void {
+    const engineIndependent = kind === 'read' || kind === 'watch';
+    const scope = feedbackScope(engineIndependent ? 'global' : engineContextKey(), `compose:state:${kind}`, file, {});
+    const previous = (engineIndependent ? composeFileErrors : composeStateErrors).record(kind, scope);
+    if (previous) resolveError(previous, engineIndependent ? null : undefined);
+    reportError(error, undefined, undefined, scope, { engineIndependent });
+  }
+
+  function publishResourceLoadErrors(): void {
+    const details = resourceLoadErrors.details();
+    if (!details) {
+      resolveError('resource-load');
+      return;
+    }
+    reportError(details, undefined, undefined, 'resource-load', { resourceRefresh: true });
+  }
+
+  function replayStudioResources(): void {
+    const engine = getConfig().engine;
+    const currentContext = engineContextKey();
+    if (resourceLoadErrors.setContext(currentContext)) resolveError('resource-load');
+    for (const [command, value] of resourceSnapshots.entries(currentContext)) {
+      studioPanel.postMessage({ command, payload: value, engine });
+    }
+    if (resourceLoadErrors.details()) publishResourceLoadErrors();
   }
 
   async function withStudioProgress<T>(
@@ -256,7 +421,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     label: string,
     task: (report: (event: OperationEvent) => void) => Promise<T>
   ): Promise<T> {
-    const id = progress.start(key, label);
+    const locale = resolveBackendLocale();
+    const id = progress.start(key, label, locale === 'en' || locale === 'pt-BR' ? locale : undefined);
     try {
       return await task((event) => progress.report(id, event));
     } finally {
@@ -266,7 +432,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const cfg = getConfig();
   if (cfg.autoDetectFiles) {
-    await fileDetector.scan();
+    try {
+      await fileDetector.scan();
+      resolveError('compose-file-scan', null);
+    } catch (error) {
+      reportError(error, undefined, undefined, 'compose-file-scan', { engineIndependent: true });
+    }
     fileDetector.startWatching();
   }
   const initialFiles = fileDetector.getFiles();
@@ -300,6 +471,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   function sendComposeState(): void {
     const file = getActiveComposeFile();
+    const stateContext = feedbackScope(engineContextKey(), 'compose:state', file, {});
+    for (const scope of composeStateErrors.setContext(stateContext)) resolveError(scope);
+    const fileContext = feedbackScope('global', 'compose:state', file, {});
+    for (const scope of composeFileErrors.setContext(fileContext)) resolveError(scope, null);
     let snapshot: ReturnType<PodmanService['getComposeProjectSnapshot']> | undefined;
     let snapshotError: unknown;
     if (file) {
@@ -311,8 +486,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
     try {
       watchActiveComposeFile(file, snapshot?.dependencies.files.map((dependency) => dependency.path));
+      resolveComposeStateError('watch');
     } catch (error) {
-      reportError(error);
+      reportComposeStateError('watch', file, error);
     }
     studioPanel.postMessage({
       command: A.COMPOSE_FILES_UPDATE,
@@ -321,6 +497,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     if (!file) {
       studioPanel.postMessage({
         command: A.COMPOSE_UPDATE,
+        engine: getConfig().engine,
         payload: { document: null, activeFile: null, rawYaml: '' },
       });
       return;
@@ -328,8 +505,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     let rawYaml: string;
     try {
       rawYaml = fs.readFileSync(file, 'utf-8');
+      resolveComposeStateError('read');
     } catch (error) {
-      reportError(error);
+      reportComposeStateError('read', file, error);
       return;
     }
     let document: ComposeDocument = { services: {} };
@@ -342,6 +520,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
     const options = snapshot?.options ?? podman.getComposeProjectOptions(file);
     const customized = snapshot?.customized ?? false;
+    if (!customized) resolveComposeStateError('resolve');
     const dependenciesIncomplete = snapshot?.dependencies.incomplete ?? false;
     const revision = snapshot?.revision ?? null;
     let projectError: string | null = snapshotError
@@ -356,6 +535,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const resolving = Boolean(customized && revision && !parseError && !projectError && !cached);
     studioPanel.postMessage({
       command: A.COMPOSE_UPDATE,
+      engine: getConfig().engine,
       payload: {
         document, activeFile: file, rawYaml, serviceFragments, parseError,
         projectOptions: options, projectRevision: revision, projectError,
@@ -376,6 +556,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           return;
         }
         resolvedCompose = { file, revision, document: resolved };
+        resolveComposeStateError('resolve');
         sendComposeState();
       }).catch((error: unknown) => {
         if (pendingComposeResolution !== pending || getActiveComposeFile() !== file) return;
@@ -393,7 +574,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
         const message = error instanceof Error ? error.message : String(error);
         resolvedCompose = { file, revision, error: message };
-        reportError(message);
+        reportComposeStateError('resolve', file, error);
         sendComposeState();
       }).finally(() => {
         if (pendingComposeResolution === pending) pendingComposeResolution = undefined;
@@ -407,36 +588,51 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     if (watchedComposeKey === key) {
       return;
     }
-    activeComposeWatchers.forEach((watcher) => watcher.dispose());
-    activeComposeWatchers = [];
-    watchedComposeKey = key;
-    if (!file) {
-      return;
-    }
-    for (const target of files) {
-      const watcher = vscode.workspace.createFileSystemWatcher(
-        new vscode.RelativePattern(path.dirname(target), path.basename(target))
-      );
-      const update = () => {
-        if (watchedComposeKey === key && getActiveComposeFile() === file) {
-          resolvedCompose = undefined;
-          statusProvider.clearActiveFile();
-          statusProvider.startPolling(file, getConfig().pollingInterval);
-          sendComposeState();
+    const nextWatchers: vscode.FileSystemWatcher[] = [];
+    try {
+      if (file) {
+        for (const target of files) {
+          const watcher = vscode.workspace.createFileSystemWatcher(
+            new vscode.RelativePattern(path.dirname(target), path.basename(target))
+          );
+          nextWatchers.push(watcher);
+          const update = () => {
+            if (watchedComposeKey === key && getActiveComposeFile() === file) {
+              resolvedCompose = undefined;
+              statusProvider.clearActiveFile();
+              statusProvider.startPolling(file, getConfig().pollingInterval);
+              sendComposeState();
+            }
+          };
+          watcher.onDidChange(update);
+          watcher.onDidCreate(update);
+          watcher.onDidDelete(update);
         }
-      };
-      watcher.onDidChange(update);
-      watcher.onDidCreate(update);
-      watcher.onDidDelete(update);
-      activeComposeWatchers.push(watcher);
+      }
+    } catch (error) {
+      nextWatchers.forEach((watcher) => watcher.dispose());
+      throw error;
     }
+    activeComposeWatchers.forEach((watcher) => watcher.dispose());
+    activeComposeWatchers = nextWatchers;
+    watchedComposeKey = key;
   }
 
   context.subscriptions.push(
     fileDetector.onFilesChanged(() => sendComposeState()),
+    fileDetector.onFileRegistered((file) => {
+      const scope = composeRegistrationScope(file);
+      feedbackAttempts.invalidate(scope);
+      resolveError(scope, null);
+    }),
     { dispose: () => activeComposeWatchers.forEach((watcher) => watcher.dispose()) }
   );
-  watchActiveComposeFile(activeComposeFile);
+  composeStateErrors.setContext(feedbackScope(engineContextKey(), 'compose:state', activeComposeFile, {}));
+  try {
+    watchActiveComposeFile(activeComposeFile);
+  } catch (error) {
+    reportComposeStateError('watch', activeComposeFile, error);
+  }
 
   function readComposeEditBase(file: string | undefined, payload: any): string {
     assertComposeProjectContext(file, payload);
@@ -500,6 +696,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     readComposeEditBase(file, payload);
     fs.writeFileSync(file, content, 'utf-8');
     sendComposeState();
+    resolveError();
     if (requestId) {
       studioPanel.postMessage({
         command: A.COMPOSE_EDIT_SAVED,
@@ -525,15 +722,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   }
 
-  async function refreshAllStudioData(selectedCompose?: string): Promise<void> {
-    return withStudioProgress('refresh-all', bt('refreshingStudio'), () =>
-      refreshStudioData(selectedCompose)
+  async function refreshAllStudioData(selectedCompose?: string, reuseInFlight = false): Promise<void> {
+    const key = JSON.stringify([engineContextKey(), selectedCompose || activeComposeFile]);
+    const locale = resolveBackendLocale();
+    return refreshCoordinator.run(key, bt('refreshingStudio'), () =>
+      refreshStudioData(selectedCompose), reuseInFlight, locale === 'en' || locale === 'pt-BR' ? locale : undefined
     );
   }
 
   async function refreshStudioData(selectedCompose?: string): Promise<void> {
     const currentCfg = getConfig();
     const initialContext = engineContextKey();
+    resourceSnapshots.setContext(initialContext);
+    if (resourceLoadErrors.setContext(initialContext)) resolveError('resource-load');
+    if (studioPanel.isVisible() && resourceLoadErrors.details()) publishResourceLoadErrors();
     const generation = ++refreshGeneration;
     if (selectedCompose && fs.existsSync(selectedCompose)) {
       activeComposeFile = selectedCompose;
@@ -553,7 +755,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     ];
     const listVersions = commands.map(nextListGeneration);
     const containers = podman.listAllContainers();
-    const results = await Promise.allSettled([
+    const tasks = [
       podman.getSystemInfo(),
       podman.listDockerContexts(),
       podman.listMachines(),
@@ -563,53 +765,57 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       podman.listNetworks(),
       podman.listVolumes(),
       podman.getDiskUsage(),
-    ] as const);
-    if (generation !== refreshGeneration || engineContextKey() !== initialContext) {
-      return;
-    }
-    const [sysInfo] = results;
-    statusBar.updateMachineBadge(
-      sysInfo.status === 'fulfilled' && Boolean(sysInfo.value.engineVersion)
-    );
+    ];
+    await Promise.all(tasks.map(async (task, index) => {
+      try {
+        const value = await task;
+        if (generation !== refreshGeneration || engineContextKey() !== initialContext ||
+            listGenerations.get(commands[index]) !== listVersions[index]) return;
+        if (index === 0) {
+          statusBar.updateMachineBadge(Boolean(
+            value && typeof value === 'object' && 'engineVersion' in value && value.engineVersion
+          ));
+        }
+        resourceSnapshots.set(initialContext, commands[index], value);
+        const recovered = resourceLoadErrors.resolve(commands[index]);
+        if (studioPanel.isVisible()) {
+          studioPanel.postMessage({ command: commands[index], payload: value, engine: currentCfg.engine });
+          if (recovered) publishResourceLoadErrors();
+        }
+      } catch (error) {
+        if (generation !== refreshGeneration || engineContextKey() !== initialContext ||
+            listGenerations.get(commands[index]) !== listVersions[index]) return;
+        if (index === 0) statusBar.updateMachineBadge(false);
+        const changed = resourceLoadErrors.fail(commands[index], error);
+        if (changed && studioPanel.isVisible()) publishResourceLoadErrors();
+      }
+    }));
+    if (generation !== refreshGeneration || engineContextKey() !== initialContext) return;
 
     if (studioPanel.isVisible()) {
-      results.forEach((result, index) => {
-        if (listGenerations.get(commands[index]) !== listVersions[index]) return;
-        if (result.status === 'fulfilled') {
-          studioPanel.postMessage({ command: commands[index], payload: result.value, engine: currentCfg.engine });
-        } else {
-          studioPanel.postMessage({
-            command: commands[index], payload: index === 0 ? null : [], engine: currentCfg.engine,
-          });
-        }
-      });
-      const failures = results.flatMap((result, index) => {
-        if (result.status !== 'rejected' || listGenerations.get(commands[index]) !== listVersions[index]) return [];
-        const reason = result.reason instanceof Error
-          ? result.reason.message
-          : String(result.reason);
-        return [`${commands[index]}: ${reason}`];
-      });
-      if (failures.length) {
-        const message = failures.join('\n');
-        if (message !== lastRefreshError) {
-          lastRefreshError = message;
-          reportError(message);
-        }
-      } else {
-        lastRefreshError = '';
-      }
       try {
         await fileDetector.scan();
-        if (generation !== refreshGeneration || engineContextKey() !== initialContext) return;
+        if (generation === refreshGeneration && engineContextKey() === initialContext) {
+          resolveError('compose-file-scan', null);
+        }
+      } catch (error) {
+        if (generation === refreshGeneration && engineContextKey() === initialContext) {
+          reportError(error, undefined, undefined, 'compose-file-scan', { engineIndependent: true });
+        }
+      }
+      if (generation !== refreshGeneration || engineContextKey() !== initialContext) return;
+      try {
         sendComposeState();
         const composeStatuses = await statusProvider.poll();
         if (generation !== refreshGeneration || engineContextKey() !== initialContext) return;
         studioPanel.postMessage({
           command: A.CONTAINERS_UPDATE, payload: composeStatuses, engine: currentCfg.engine,
         });
+        resolveError('compose-status-refresh');
       } catch (error) {
-        reportError(error);
+        if (generation === refreshGeneration && engineContextKey() === initialContext) {
+          reportError(error, undefined, undefined, 'compose-status-refresh');
+        }
       }
     }
   }
@@ -685,7 +891,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     const host = defaultHostForProvider(provider, registryUrl);
     if (!host) {
-      throw new Error(bt('provideRegistryUrl'));
+      throw new UserFacingError('provideRegistryUrl');
     }
     const currentCfg = getConfig();
     const secret = await context.secrets.get(SECRET_KEY);
@@ -742,7 +948,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const found = (await currentComposeStatuses())
       .find((c) => (!c.service || c.service === serviceName) && isActiveComposeStatus(c.status, engine));
     if (found) {
-      throw new Error(bt('stopServiceBeforeEdit', { service: serviceName }));
+      throw new UserFacingError('stopServiceBeforeEdit', { service: serviceName }, 'resourceInUse');
     }
   }
 
@@ -752,10 +958,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       .filter((c) => isActiveComposeStatus(c.status, engine))
       .map((c) => c.service || '(unknown service)');
     if (active.length > 0) {
-      throw new Error(
-        bt('stopAllBeforeRawSave', {
-          services: Array.from(new Set(active)).join(', '),
-        })
+      throw new UserFacingError(
+        'stopAllBeforeRawSave',
+        { services: Array.from(new Set(active)).join(', ') },
+        'resourceInUse'
       );
     }
   }
@@ -766,14 +972,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       getConfig().engine === 'podman' ? 'podman-compose.yml' : 'docker-compose.yml';
     const fileName = (fileNameInput || defaultName).trim();
     if (!fileName.endsWith('.yml') && !fileName.endsWith('.yaml')) {
-      throw new Error(bt('invalidComposeExtension'));
+      throw new UserFacingError('invalidComposeExtension');
     }
     if (fileName !== path.basename(fileName)) {
-      throw new Error(bt('fileNameOnlyError'));
+      throw new UserFacingError('fileNameOnlyError');
     }
     const dirRaw = dirInput?.trim() || '.';
     if (!wsRoot && !path.isAbsolute(dirRaw)) {
-      throw new Error(bt('selectFolderOrWorkspaceError'));
+      throw new UserFacingError('selectFolderOrWorkspaceError');
     }
     const baseDir = path.isAbsolute(dirRaw) ? dirRaw : path.resolve(wsRoot!, dirRaw);
     return path.resolve(baseDir, fileName);
@@ -802,33 +1008,57 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       errorCode?: string;
       completed?: number;
       total?: number;
+      recovery?: BatchRecovery;
     }>,
     options?: { includeOutput?: boolean; requestId?: string }
   ): Promise<boolean> {
+    const operationLocale = resolveBackendLocale();
     const success = await withStudioProgress(opKey, label, async (report) => {
-      const res = await withStatus(label, () => podman.withCommandProgress(report, task));
+      let res: Awaited<ReturnType<typeof task>>;
+      try {
+        res = await withStatus(label, () => podman.withCommandProgress(report, task));
+      } catch (error) {
+        reportError(error, label, undefined, undefined, { operationKey: opKey, operationLocale });
+        return false;
+      }
+      const currentScope = isCurrentFeedback() ? messageFeedback.getStore()?.scope : undefined;
+      if (res.recovery && currentScope) {
+        for (const scope of batchErrors.resolve(res.recovery)) resolveError(scope);
+        if (!res.success) batchErrors.record(currentScope, res.recovery);
+      }
       if (!res.success) {
         const details = [res.stderr?.trim(), res.stdout?.trim()].filter(Boolean).join('\n') ||
           bt('engineFailedDefault', { engine: getEngineLabel() });
-        reportError(details, label, res.errorCode, summarizeFailure(details, res.errorCode, label, res));
+        reportError(details, label, res.errorCode, undefined, {
+          progress: res, operationKey: opKey, operationLocale,
+        });
         return false;
       }
+      resolveError();
       const details = options?.includeOutput
         ? [res.stdout?.trim(), res.stderr?.trim()].filter(Boolean).join('\n')
         : '';
       if (details) {
         output.appendLine(`[${new Date().toISOString()}] ${label}:\n${details}`);
       }
-      studioPanel.postMessage({
-        command: A.NOTIFICATION,
-        payload: {
-          type: 'success',
-          message: bt('opCompleted', { op: label }),
-          ...(details ? { details: boundedDetails(details) } : {}),
-        },
-      });
-      if (!studioPanel.isVisible()) {
-        void vscode.window.showInformationMessage(bt('opCompleted', { op: label }));
+      if (isCurrentFeedback()) {
+        studioPanel.postMessage({
+          command: A.NOTIFICATION,
+          engine: feedbackEngine(messageFeedback.getStore()),
+          payload: {
+            type: 'success',
+            message: bt('opCompleted', { op: label }),
+            operation: {
+              key: opKey,
+              label,
+              labelLocale: operationLocale === 'en' || operationLocale === 'pt-BR' ? operationLocale : undefined,
+            },
+            ...(details ? { details: boundedDetails(details) } : {}),
+          },
+        });
+        if (!studioPanel.isVisible()) {
+          void vscode.window.showInformationMessage(bt('opCompleted', { op: label }));
+        }
       }
       return true;
     });
@@ -866,13 +1096,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       count: ids.length,
       resource: bt(resource === 'pod' ? 'batchPods' : 'batchContainers'),
     });
+    const group = feedbackScope(engineContextKey(), 'podman:batch', undefined, { resource, action });
     await notifyResult(`${resource}-batch`, label, async () => {
       const results = await podman.runPodmanBatch(resource, action, ids);
       const failures = results.filter((item) => !item.result.success);
+      const succeeded = results.filter((item) => item.result.success).map((item) => item.id);
+      const succeededIds = new Set(succeeded);
       return {
-        success: failures.length === 0,
+        success: failures.length === 0 && results.length === ids.length,
         completed: results.length - failures.length,
         total: ids.length,
+        recovery: {
+          group,
+          succeeded,
+          pending: ids.map((id) => id.toLowerCase()).filter((id) => !succeededIds.has(id)),
+        },
         errorCode: failures.find((item) => item.result.errorCode === 'ETIMEDOUT')?.result.errorCode ??
           failures[0]?.result.errorCode,
         stdout: '',
@@ -947,15 +1185,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       count: unique.length,
       resource: resourceName,
     });
+    const group = feedbackScope(initialContext, 'resource:remove', undefined, { resource });
     try {
       await notifyResult(`${resource}-remove-batch`, label, async () => {
         const results = await podman.removeResourceSelection(resource, unique, expectedEngine);
         const failures = results.filter((item) => !item.result.success);
         const successes = results.filter((item) => item.result.success);
+        const successfulNames = new Set(successes.map((item) => item.name));
+        const targetKey = (target: ResourceRemovalTarget) => JSON.stringify([target.name, target.identity]);
+        const succeeded = unique.filter((target) => successfulNames.has(target.name)).map(targetKey);
         return {
-          success: failures.length === 0,
+          success: failures.length === 0 && results.length === unique.length,
           completed: successes.length,
           total: unique.length,
+          recovery: {
+            group,
+            succeeded,
+            pending: unique.filter((target) => !successfulNames.has(target.name)).map(targetKey),
+          },
           errorCode: failures.find((item) => item.result.errorCode === 'ETIMEDOUT')?.result.errorCode ??
             failures[0]?.result.errorCode,
           stdout: bt('removedResources', {
@@ -1011,26 +1258,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   async function refreshResourceList(
     resource: string,
     command: string,
-    task: () => Promise<unknown[]>
+    task: () => Promise<unknown>,
+    progressOptions?: { key: string; label: string }
   ): Promise<void> {
     const engine = getConfig().engine;
     const initialContext = engineContextKey();
+    resourceSnapshots.setContext(initialContext);
+    if (resourceLoadErrors.setContext(initialContext)) resolveError('resource-load');
     const generation = nextListGeneration(command);
     const isCurrent = () =>
       listGenerations.get(command) === generation && engineContextKey() === initialContext;
-    await withStudioProgress(`list-${command.split(':')[0]}`, bt('loadingResources', { resource }), async () => {
+    await withStudioProgress(
+      progressOptions?.key || `list-${command.split(':')[0]}`,
+      progressOptions?.label || bt('loadingResources', { resource }), async () => {
       try {
         const items = await task();
         if (isCurrent()) {
+          resourceSnapshots.set(initialContext, command, items);
           studioPanel.postMessage({ command, payload: items, engine });
+          if (resourceLoadErrors.resolve(command)) publishResourceLoadErrors();
         }
       } catch (error) {
         if (isCurrent()) {
-          studioPanel.postMessage({ command, payload: [], engine });
-          throw error;
+          resourceLoadErrors.fail(command, error);
+          publishResourceLoadErrors();
         }
       }
-    });
+      });
   }
 
   async function runComposeServiceBatch(payload: any, composeFile?: string): Promise<void> {
@@ -1086,6 +1340,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       throw new Error('Compose settings or file changed. Refresh and try again.');
     }
     const action = payload.action as 'up' | 'stop' | 'restart' | 'down' | 'build' | 'rebuild' | 'build-up';
+    const group = feedbackScope(initialSettings, 'stack:services:batch', composeFile, { action });
     const label = bt('batchOperation', {
       action: bt(action === 'up' ? 'batchStart' : action === 'stop' ? 'batchStop' :
         action === 'restart' ? 'batchRestart' : action === 'build' ? 'batchBuild' :
@@ -1094,14 +1349,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       resource: bt('batchServices'),
     });
     try {
-      await notifyResult(`compose-${action}-batch`, label, () => {
-        if (action === 'up') return podman.composeUp(composeFile, { services });
-        if (action === 'stop') return podman.composeStop(composeFile, services);
-        if (action === 'restart') return podman.composeRestart(composeFile, services);
-        if (action === 'build') return podman.composeBuild(composeFile, services);
-        if (action === 'rebuild') return podman.composeBuild(composeFile, services, undefined, { noCache: true });
-        if (action === 'build-up') return podman.composeBuildUp(composeFile, services);
-        return podman.composeRemoveServices(composeFile, services, doc, content);
+      await notifyResult(`compose-${action}-batch`, label, async () => {
+        const result = await (
+          action === 'up' ? podman.composeUp(composeFile, { services }) :
+          action === 'stop' ? podman.composeStop(composeFile, services) :
+          action === 'restart' ? podman.composeRestart(composeFile, services) :
+          action === 'build' ? podman.composeBuild(composeFile, services) :
+          action === 'rebuild' ? podman.composeBuild(composeFile, services, undefined, { noCache: true }) :
+          action === 'build-up' ? podman.composeBuildUp(composeFile, services) :
+          podman.composeRemoveServices(composeFile, services, doc, content)
+        );
+        return {
+          ...result,
+          recovery: {
+            group,
+            succeeded: result.success ? services : [],
+            pending: result.success ? [] : services,
+          },
+        };
       }, { includeOutput: action === 'down' || action === 'build' || action === 'rebuild' || action === 'build-up' });
     } finally {
       await refreshAllStudioData();
@@ -1110,30 +1375,38 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // ==================== WEBVIEW MESSAGE HANDLER ====================
 
-  studioPanel.onMessage(async (msg) => {
-    const payload = msg?.payload ?? {};
+  studioPanel.onMessage((msg) => {
+    const payload = msg?.payload && typeof msg.payload === 'object' && !Array.isArray(msg.payload)
+      ? msg.payload : {};
     const composeFile = getActiveComposeFile();
     const engine = getConfig().engine;
     const engineLabel = getEngineLabel(engine);
 
+    const initialContext = engineContextKey();
+    const engineIndependent = ENGINE_INDEPENDENT_FEEDBACK.has(String(msg?.command || ''));
+    const attempt = feedbackAttempts.start(
+      feedbackScope(engineIndependent ? 'global' : initialContext, String(msg?.command || ''),
+        engineIndependent ? undefined : composeFile, payload),
+      engine,
+      feedbackContextKey(),
+      engineIndependent
+    );
+    void messageFeedback.run(attempt, async () => {
     try {
       switch (msg.command) {
         case M.DASHBOARD_GET: {
-          await refreshAllStudioData();
+          if (payload.reuseInFlight === true) replayStudioResources();
+          await refreshAllStudioData(undefined, payload.reuseInFlight === true);
           break;
         }
         case M.SYSTEM_INFO_GET: {
-          const info = await withStudioProgress('system-info', bt('loadingSystemInfo'), () =>
-            podman.getSystemInfo()
-          );
-          studioPanel.postMessage({ command: A.SYSTEM_INFO_UPDATE, payload: info, engine });
+          await refreshResourceList('', A.SYSTEM_INFO_UPDATE, () => podman.getSystemInfo(),
+            { key: 'system-info', label: bt('loadingSystemInfo') });
           break;
         }
         case M.DISK_USAGE_GET: {
-          const df = await withStudioProgress('disk-usage', bt('loadingDiskUsage'), () =>
-            podman.getDiskUsage()
-          );
-          studioPanel.postMessage({ command: A.DISK_USAGE_UPDATE, payload: df, engine });
+          await refreshResourceList('', A.DISK_USAGE_UPDATE, () => podman.getDiskUsage(),
+            { key: 'disk-usage', label: bt('loadingDiskUsage') });
           break;
         }
 
@@ -1229,7 +1502,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         case M.POD_PAUSE:
         case M.POD_UNPAUSE: {
           if (engine !== 'podman') {
-            throw new Error(bt('podsRequirePodmanError'));
+            throw new UserFacingError('podsRequirePodmanError', undefined, 'generic');
           }
           const pause = msg.command === M.POD_PAUSE;
           await notifyResult(
@@ -1263,6 +1536,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
               .filter((l) => l.trim().length > 0)
               .map((line) => logProvider.parseLine(`pod:${payload.podName || payload.podId}`, line));
             studioPanel.postMessage({ command: A.LOG_HISTORY, payload: entries });
+            resolveError();
           });
           break;
         }
@@ -1351,6 +1625,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
               .filter((l) => l.trim().length > 0)
               .map((line) => logProvider.parseLine(payload.name || cid, line));
             studioPanel.postMessage({ command: A.LOG_HISTORY, payload: entries });
+            resolveError();
           });
           break;
         }
@@ -1543,7 +1818,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           break;
         }
         case M.COMPOSE_FILES_LIST: {
-          await fileDetector.scan();
+          try {
+            await fileDetector.scan();
+            resolveError('compose-file-scan', null);
+          } catch (error) {
+            reportError(error, undefined, undefined, 'compose-file-scan', { engineIndependent: true });
+            break;
+          }
           studioPanel.postMessage({
             command: A.COMPOSE_FILES_UPDATE,
             payload: getComposeFileList(),
@@ -1571,6 +1852,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             await fileDetector.registerFile(activeComposeFile);
             statusProvider.startPolling(activeComposeFile, getConfig().pollingInterval);
             sendComposeState();
+            resolveError();
           }
           break;
         }
@@ -1648,6 +1930,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
               payload: { file: composeFile },
               requestId: msg.requestId,
             });
+            resolveError();
           });
           break;
         }
@@ -1666,6 +1949,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
               payload: { directory: formatSelectedDir(picked[0].fsPath) },
               requestId: msg.requestId,
             });
+            resolveError();
           }
           break;
         }
@@ -1673,10 +1957,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           const generation = cancelImageSearch();
           const q = String(payload.query || '').trim();
           if (!q) {
-            studioPanel.postMessage({
-              command: A.COMPOSE_IMAGE_RESULTS,
-              payload: { results: [] },
-            });
+            postCurrentFeedback(A.COMPOSE_IMAGE_RESULTS, { results: [] });
             break;
           }
           const current = getConfig();
@@ -1692,16 +1973,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
               () => searchImages(provider, registryUrl, q, controller.signal)
             );
             if (generation === imageSearchGeneration) {
-              studioPanel.postMessage({ command: A.COMPOSE_IMAGE_RESULTS, payload: { results } });
+              resolveError();
+              postCurrentFeedback(A.COMPOSE_IMAGE_RESULTS, { results });
             }
           } catch (error) {
             if (generation === imageSearchGeneration) {
-              const message = error instanceof Error ? error.message : String(error);
               const label = bt('loadingResources', { resource: resourceLabel('image') });
-              reportError(error, label);
-              studioPanel.postMessage({
-                command: A.COMPOSE_IMAGE_RESULTS,
-                payload: { results: [], error: summarizeFailure(message, undefined, label) },
+              const failure = reportError(error, label);
+              postCurrentFeedback(A.COMPOSE_IMAGE_RESULTS, {
+                results: [], error: formatFailureSummary(resolveBackendLocale(), failure), failure,
               });
             } else if (!controller.signal.aborted) {
               output.appendLine(`[${new Date().toISOString()}] Image search: ${String(error)}`);
@@ -1714,19 +1994,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         case M.COMPOSE_FILE_CREATE: {
           const targetPath = resolveComposeTarget(payload.directory, payload.fileName);
           if (fs.existsSync(targetPath)) {
-            throw new Error(bt('fileAlreadyExists', { path: targetPath }));
+            throw new UserFacingError('fileAlreadyExists', { path: targetPath });
           }
           const yaml = serializeComposeBuilder(payload.spec);
           fs.mkdirSync(path.dirname(targetPath), { recursive: true });
           fs.writeFileSync(targetPath, yaml, { encoding: 'utf-8', flag: 'wx' });
+          await registerCreatedFileWithFeedback(targetPath);
           activeComposeFile = targetPath;
-          try {
-            await fileDetector.registerFile(targetPath);
-          } catch (error) {
-            throw new Error(`The file was created at ${targetPath}, but registration failed: ${error instanceof Error ? error.message : String(error)}`);
-          }
           statusProvider.startPolling(targetPath, getConfig().pollingInterval);
           sendComposeState();
+          resolveError();
           studioPanel.postMessage({ command: A.COMPOSE_CREATE_SAVED, requestId: msg.requestId });
           vscode.window.showInformationMessage(
             bt('composeCreatedToast', { file: path.basename(targetPath) })
@@ -1918,6 +2195,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           await logProvider.startComposeStreaming(composeFile, svc, {
             key, containerId,
           });
+          resolveError();
           break;
         }
         case M.LOGS_STOP: {
@@ -2049,7 +2327,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           const statuses = await withStudioProgress('compose-status', bt('loadingComposeStatus'), () =>
             statusProvider.poll()
           );
-          studioPanel.postMessage({ command: A.CONTAINERS_UPDATE, payload: statuses });
+          studioPanel.postMessage({ command: A.CONTAINERS_UPDATE, payload: statuses, engine });
           break;
         }
 
@@ -2060,26 +2338,53 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
         case M.SETTINGS_SET_LANGUAGE: {
           const lang = (payload.language || 'auto') as LanguageSetting;
-          await updateLanguageSetting(lang);
-          statusBar.refreshLocalization();
-          launcherProvider.refreshLocalization();
-          await sendSettingsState();
+          settingsWriteDepth++;
+          try {
+            await updateLanguageSetting(lang);
+            statusBar.refreshLocalization();
+            launcherProvider.refreshLocalization();
+            await sendSettingsState();
+            if (resourceLoadErrors.details()) publishResourceLoadErrors();
+            if (!resourceConfigRefreshPending) configRefreshPending = false;
+            resolveError();
+          } finally {
+            settingsWriteDepth--;
+            if (configRefreshPending) queueConfigRefresh();
+          }
           break;
         }
         case M.SETTINGS_SET_ENGINE: {
           const nextEngine: ContainerEngine = payload.engine === 'podman' ? 'podman' : 'docker';
-          await updateEngineSetting(nextEngine);
-          statusBar.refreshLocalization();
-          launcherProvider.refreshLocalization();
-          await sendSettingsState();
-          await refreshAllStudioData();
-          studioPanel.postMessage({
-            command: A.NOTIFICATION,
-            payload: {
-              type: 'success',
-              message: bt('engineSwitchedToast', { engine: getEngineLabel(nextEngine) }),
-            },
-          });
+          settingsWriteDepth++;
+          try {
+            await updateEngineSetting(nextEngine);
+            statusBar.refreshLocalization();
+            launcherProvider.refreshLocalization();
+            const appliedGeneration = configChangeGeneration;
+            const currentFile = getActiveComposeFile();
+            if (currentFile) statusProvider.startPolling(currentFile, getConfig().pollingInterval);
+            await sendSettingsState();
+            sendComposeState();
+            await refreshAllStudioData();
+            if (configChangeGeneration === appliedGeneration) {
+              configRefreshPending = false;
+              resourceConfigRefreshPending = false;
+            }
+            if (getConfig().engine === nextEngine && isCurrentFeedback()) {
+              resolveError();
+              studioPanel.postMessage({
+                command: A.NOTIFICATION,
+                engine: nextEngine,
+                payload: {
+                  type: 'success',
+                  message: bt('engineSwitchedToast', { engine: getEngineLabel(nextEngine) }),
+                },
+              });
+            }
+          } finally {
+            settingsWriteDepth--;
+            if (configRefreshPending) queueConfigRefresh();
+          }
           break;
         }
         case M.SETTINGS_SAVE: {
@@ -2089,7 +2394,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
               if (payload.longOperationTimeoutMinutes !== undefined &&
                   (!Number.isInteger(payload.longOperationTimeoutMinutes) ||
                    payload.longOperationTimeoutMinutes < 5 || payload.longOperationTimeoutMinutes > 720)) {
-                throw new Error(bt('invalidLongOperationTimeout'));
+                throw new UserFacingError('invalidLongOperationTimeout');
               }
 
               const target = vscode.workspace.workspaceFolders?.length
@@ -2156,7 +2461,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                     const details = (loginRes.stderr || loginRes.stdout || bt('failureGeneric'))
                       .split(effectiveSecret).join('[redacted]');
                     await sendSettingsState();
-                    reportError(details, undefined, loginRes.errorCode, bt('settingsSavedLoginIssue', { cmd }));
+                    reportError(details, undefined, loginRes.errorCode, undefined, {
+                      settingsSavedLogin: cmd, engine: cmd,
+                    });
                     return false;
                   }
                 }
@@ -2170,12 +2477,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 statusProvider.startPolling(currentFile, getConfig().pollingInterval);
               }
               await sendSettingsState();
+              sendComposeState();
               await refreshAllStudioData();
+              resolveError();
               studioPanel.postMessage({
                 command: A.NOTIFICATION,
                 payload: { type: 'success', message: bt('settingsSavedToast') },
               });
-              if (configChangeGeneration === savedConfigGeneration) configRefreshPending = false;
+              if (configChangeGeneration === savedConfigGeneration) {
+                configRefreshPending = false;
+                resourceConfigRefreshPending = false;
+              }
               return true;
             });
             if (msg.requestId) {
@@ -2201,53 +2513,50 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 const username =
                   merged.registryUsername || (merged.registryProvider === 'ecr' ? 'AWS' : '');
                 if (!username) {
-                  throw new Error(bt('provideUsernameForLogin', { cmd }));
+                  throw new UserFacingError('provideUsernameForLogin', { cmd });
                 }
                 if (!host && cmd === 'podman') {
-                  throw new Error(bt('provideRegistryUrl'));
+                  throw new UserFacingError('provideRegistryUrl');
                 }
                 const res = await podman.loginRegistry(host, username, secret, cmd);
                 if (!res.success) {
                   throw new Error(res.stderr || `${cmd} login failed.`);
                 }
                 const okMsg = { ok: true, message: bt('engineLoginSuccess', { cmd, host }) };
-                studioPanel.postMessage({ command: A.SETTINGS_TEST_RESULT, payload: okMsg });
+                resolveError();
+                postCurrentFeedback(A.SETTINGS_TEST_RESULT, okMsg);
                 return;
               }
               if (merged.registryProvider === 'quay' && !merged.registryUrl) {
                 await searchImages('quay', '', 'podman');
-                studioPanel.postMessage({
-                  command: A.SETTINGS_TEST_RESULT,
-                  payload: { ok: true, message: bt('quayOk') },
-                });
+                resolveError();
+                postCurrentFeedback(A.SETTINGS_TEST_RESULT, { ok: true, message: bt('quayOk') });
                 return;
               }
               if (merged.registryProvider === 'dockerhub' && !merged.registryUrl) {
                 await searchImages('dockerhub', '', 'alpine');
-                studioPanel.postMessage({
-                  command: A.SETTINGS_TEST_RESULT,
-                  payload: { ok: true, message: bt('dockerHubOk') },
-                });
+                resolveError();
+                postCurrentFeedback(A.SETTINGS_TEST_RESULT, { ok: true, message: bt('dockerHubOk') });
                 return;
               }
               if (!host) {
-                throw new Error(bt('provideRegistryUrl'));
+                throw new UserFacingError('provideRegistryUrl');
               }
               await httpGetJson(
                 `https://${host}/v2/_catalog?n=1`,
                 buildAuthHeaders(merged.registryAuthType, merged.registryUsername, secret)
               );
-              studioPanel.postMessage({
-                command: A.SETTINGS_TEST_RESULT,
-                payload: { ok: true, message: bt('registryOk', { host }) },
-              });
+              resolveError();
+              postCurrentFeedback(A.SETTINGS_TEST_RESULT, { ok: true, message: bt('registryOk', { host }) });
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
               const safeMessage = secret ? message.split(secret).join('[redacted]') : message;
-              reportError(safeMessage, bt('testingRegistry'));
-              studioPanel.postMessage({
-                command: A.SETTINGS_TEST_RESULT,
-                payload: { ok: false, message: summarizeFailure(safeMessage, undefined, bt('testingRegistry')) },
+              const safeError = error instanceof UserFacingError ? error : safeMessage;
+              const errorCode = error instanceof Error && 'code' in error && typeof error.code === 'string'
+                ? (secret ? error.code.split(secret).join('[redacted]') : error.code) : undefined;
+              const failure = reportError(safeError, bt('testingRegistry'), errorCode);
+              postCurrentFeedback(A.SETTINGS_TEST_RESULT, {
+                ok: false, message: formatFailureSummary(resolveBackendLocale(), failure), failure,
               });
             }
           });
@@ -2262,23 +2571,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             try {
               await disconnectRegistryCredentials(podman, context.secrets, host, cmd, shouldLogout);
               await sendSettingsState();
-              studioPanel.postMessage({
-                command: A.SETTINGS_TEST_RESULT,
-                payload: {
-                  ok: true,
-                  message: shouldLogout
-                    ? bt('registryDisconnected', { cmd })
-                    : bt('registryCredentialsRemoved'),
-                },
+              resolveError();
+              postCurrentFeedback(A.SETTINGS_TEST_RESULT, {
+                ok: true,
+                message: shouldLogout
+                  ? bt('registryDisconnected', { cmd })
+                  : bt('registryCredentialsRemoved'),
               });
               return true;
             } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              studioPanel.postMessage({
-                command: A.SETTINGS_TEST_RESULT,
-                payload: { ok: false, message: summarizeFailure(message, undefined, bt('disconnectingRegistry')) },
+              const failure = reportError(error, bt('disconnectingRegistry'));
+              postCurrentFeedback(A.SETTINGS_TEST_RESULT, {
+                ok: false, message: formatFailureSummary(resolveBackendLocale(), failure), failure,
               });
-              reportError(error, bt('disconnectingRegistry'));
               return false;
             }
           });
@@ -2293,6 +2598,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           await withStudioProgress('settings-reset', bt('resettingPaths'), async () => {
             await resetEnginePaths();
             await sendSettingsState();
+            resolveError();
             studioPanel.postMessage({
               command: A.NOTIFICATION, payload: { type: 'success', message: bt('pathsResetToast') },
             });
@@ -2307,6 +2613,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         case M.OPEN_EXTERNAL: {
           if (payload.url) {
             await vscode.env.openExternal(vscode.Uri.parse(String(payload.url)));
+            resolveError();
           }
           break;
         }
@@ -2315,15 +2622,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             'workbench.action.openSettings',
             '@ext:ItaloAlmeida.docker-and-podman-studio'
           );
+          resolveError();
           break;
         }
         case M.OUTPUT_SHOW: {
           output.show(true);
+          resolveError();
           break;
         }
         case M.OUTPUT_COPY: {
           if (typeof payload.text === 'string') {
             await vscode.env.clipboard.writeText(payload.text);
+            resolveError();
           }
           break;
         }
@@ -2333,6 +2643,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
       }
     } catch (err: unknown) {
+      if (msg.command === M.SETTINGS_SET_ENGINE) {
+        try {
+          await sendSettingsState();
+          sendComposeState();
+        } catch (settingsError) {
+          output.appendLine(`[${new Date().toISOString()}] Could not restore engine settings: ${String(settingsError)}`);
+        }
+      }
       if (msg.requestId) {
         studioPanel.postMessage({
           command: A.ACTION_RESULT, requestId: msg.requestId, payload: { success: false },
@@ -2347,8 +2665,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if ((msg.command === M.SERVICE_ADD || msg.command === M.SERVICE_UPDATE) && msg.requestId) {
         studioPanel.postMessage({ command: A.COMPOSE_EDIT_FAILED, requestId: msg.requestId });
       }
-      reportError(err);
+      if (!(err instanceof UserFacingError && err.presentation.key === 'composeRegistrationFailed')) {
+        reportError(err);
+      }
+    } finally {
+      feedbackAttempts.finish(attempt);
     }
+    });
   });
 
   // Push live status & log updates to Webview
@@ -2357,29 +2680,51 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       command: A.CONTAINERS_UPDATE, payload: containers, engine: getConfig().engine,
     });
   });
-  statusProvider.onError((message) => reportError(message));
+  statusProvider.onError((message) =>
+    reportError(message, bt('loadingComposeStatus'), undefined, 'compose-status'));
+  statusProvider.onRecovery(() => resolveError('compose-status'));
   logProvider.onLogLine((entry) => {
     studioPanel.postMessage({ command: A.LOG_LINE, payload: entry });
   });
-  logProvider.onError((message) => reportError(message));
+  const logErrorScope = (target: { key: string; source: string }) =>
+    `log-stream:${JSON.stringify([target.key, target.source])}`;
+  logProvider.onError((error) =>
+    reportError(error.message, bt('loadingLogs'), undefined, logErrorScope(error), { engine: error.engine }));
+  logProvider.onRecovery((target) => resolveError(logErrorScope(target), target.engine));
 
-  function queueConfigRefresh(): void {
-    configChangeGeneration++;
-    configRefreshPending = true;
-    if (settingsWriteDepth > 0) return;
+  const resourceConfigKeys: Array<keyof StudioConfig> = [
+    'engine', 'dockerPath', 'podmanPath', 'composePath', 'composeCommandStyle',
+    'inPod', 'machineName', 'pollingInterval', 'autoDetectFiles',
+  ];
+
+  function queueConfigRefresh(event?: vscode.ConfigurationChangeEvent): void {
+    if (event) {
+      feedbackContextKey();
+      configChangeGeneration++;
+      configRefreshPending = true;
+      resourceConfigRefreshPending ||= resourceConfigKeys.some((key) =>
+        event.affectsConfiguration(`${CONFIG_SECTION}.${key}`));
+    }
+    if (!configRefreshPending || settingsWriteDepth > 0) return;
     if (configRefreshTimer) clearTimeout(configRefreshTimer);
     configRefreshTimer = setTimeout(() => {
       configRefreshTimer = undefined;
       if (settingsWriteDepth > 0) return;
       configRefreshPending = false;
-      const updated = getConfig();
-      const currentFile = getActiveComposeFile();
-      if (currentFile) {
-        statusProvider.startPolling(currentFile, updated.pollingInterval);
-      }
+      const refreshResources = resourceConfigRefreshPending;
+      resourceConfigRefreshPending = false;
       statusBar.refreshLocalization();
       launcherProvider.refreshLocalization();
-      void Promise.all([sendSettingsState(), refreshAllStudioData()]).catch((error) => reportError(error));
+      void (async () => {
+        await sendSettingsState();
+        if (refreshResources) {
+          const currentFile = getActiveComposeFile();
+          if (currentFile) statusProvider.startPolling(currentFile, getConfig().pollingInterval);
+          sendComposeState();
+          await refreshAllStudioData();
+        }
+        resolveError('config-refresh');
+      })().catch((error) => reportError(error, undefined, undefined, 'config-refresh'));
     }, 250);
   }
 
@@ -2406,13 +2751,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const openPanelDisp = vscode.commands.registerCommand(
     'dockerPodmanStudio.openPanel',
     async () => {
+      const alreadyOpen = studioPanel.isVisible();
       studioPanel.createOrShowPanel();
       await vscode.commands.executeCommand('workbench.action.closeSidebar');
       await vscode.commands.executeCommand('workbench.action.closePanel');
-      setTimeout(async () => {
-        await refreshAllStudioData();
-        await sendSettingsState();
-      }, 350);
+      if (alreadyOpen) {
+        await Promise.all([sendSettingsState(), refreshAllStudioData(undefined, true)]);
+      }
     }
   );
 

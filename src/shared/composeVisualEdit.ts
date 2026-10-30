@@ -1,4 +1,5 @@
 import * as YAML from 'yaml';
+import { ComposeVisualError } from './composeVisualMessages';
 
 export const VISUAL_SERVICE_FIELDS = [
   'image', 'buildContext', 'buildDockerfile', 'restart', 'command',
@@ -18,8 +19,8 @@ export interface VisualServiceDraft {
 
 function documentFor(fragment: string): { doc: YAML.Document; service: YAML.YAMLMap } {
   const doc = YAML.parseDocument(fragment, { uniqueKeys: true });
-  if (doc.errors.length) throw new Error(doc.errors[0].message);
-  if (!YAML.isMap(doc.contents)) throw new Error('The service must be a direct mapping for visual editing.');
+  if (doc.errors.length) throw new ComposeVisualError('invalidYaml', {}, doc.errors[0].message);
+  if (!YAML.isMap(doc.contents)) throw new ComposeVisualError('directMapping');
   return { doc, service: doc.contents };
 }
 
@@ -131,11 +132,11 @@ function setEnvironment(doc: YAML.Document, service: YAML.YAMLMap, text: string)
   const entries = lines.map((line) => {
     const separator = line.indexOf('=');
     const key = (separator < 0 ? line : line.slice(0, separator)).trim();
-    if (!key || /[\s=]/.test(key)) throw new Error(`Invalid environment key: "${key}".`);
+    if (!key || /[\s=]/.test(key)) throw new ComposeVisualError('invalidEnvKey', { key });
     return [key, separator < 0 ? null : line.slice(separator + 1)] as const;
   });
   if (new Set(entries.map(([key]) => key)).size !== entries.length) {
-    throw new Error('Environment keys must be unique.');
+    throw new ComposeVisualError('duplicateEnvKeys');
   }
   if (!entries.length) {
     service.delete('environment');
@@ -167,10 +168,10 @@ export function applyVisualServiceDraft(draft: VisualServiceDraft): string {
   const current = createVisualServiceDraft(draft.source);
   for (const field of VISUAL_SERVICE_FIELDS) {
     if (draft.initial[field] !== current.initial[field]) {
-      throw new Error('The visual service draft no longer matches its source.');
+      throw new ComposeVisualError('staleDraft');
     }
     if (draft.values[field] !== draft.initial[field] && !current.supported[field]) {
-      throw new Error(`The "${field}" field uses an advanced form; edit it in YAML instead.`);
+      throw new ComposeVisualError('advancedField', { field });
     }
   }
   for (const field of ['image', 'restart', 'command'] as const) {
@@ -182,7 +183,7 @@ export function applyVisualServiceDraft(draft: VisualServiceDraft): string {
         const names = draft.values[field].split(/\r?\n/).map((name) => name.trim()).filter(Boolean);
         if (names.some((name) => !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) ||
             new Set(names).size !== names.length) {
-          throw new Error('Dependencies must have valid, unique service names.');
+          throw new ComposeVisualError('invalidDependencies');
         }
       }
       setSequence(doc, service, key, draft.values[field]);
@@ -195,14 +196,14 @@ export function applyVisualServiceDraft(draft: VisualServiceDraft): string {
       draft.values.buildDockerfile !== draft.initial.buildDockerfile) {
     const context = draft.values.buildContext.trim();
     const dockerfile = draft.values.buildDockerfile.trim();
-    if (!context && dockerfile) throw new Error('A build context is required when a Dockerfile is specified.');
+    if (!context && dockerfile) throw new ComposeVisualError('missingBuildContext');
     if (!context) {
       const existing = service.get('build', true);
       if (YAML.isMap(existing) && existing.items.some((pair) =>
         !YAML.isScalar(pair.key) ||
         (pair.key.value !== 'context' && pair.key.value !== 'dockerfile')
       )) {
-        throw new Error('The build configuration has advanced fields; remove it in YAML instead.');
+        throw new ComposeVisualError('advancedBuild');
       }
       service.delete('build');
     } else {

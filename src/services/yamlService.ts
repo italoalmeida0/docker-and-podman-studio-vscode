@@ -1,5 +1,6 @@
 import * as YAML from 'yaml';
 import { bt } from '../i18n';
+import { UserFacingError } from '../shared/userFacingError';
 import { ComposeDocument } from '../types';
 
 export const TOP_LEVEL_KEYS = [
@@ -324,7 +325,7 @@ export class YamlService {
     }
     const trimmed = String(rawFragment || '').trim();
     if (!trimmed) {
-      throw new Error(bt('emptyServiceYamlError'));
+      throw new UserFacingError('emptyServiceYamlError');
     }
     const fragment = this.parseEditableDocument(trimmed);
     let definition: unknown = fragment.contents;
@@ -337,7 +338,7 @@ export class YamlService {
       }
     }
     if (!YAML.isMap(definition) && !YAML.isAlias(definition)) {
-      throw new Error(bt('invalidServiceYamlObject'));
+      throw new UserFacingError('invalidServiceYamlObject');
     }
     const doc = this.parseEditableDocument(content);
     const services = this.editableSection(doc, 'services');
@@ -394,7 +395,7 @@ export class YamlService {
   public parseServiceFragment(serviceName: string, rawFragment: string): Record<string, any> {
     const trimmed = String(rawFragment || '').trim();
     if (!trimmed) {
-      throw new Error(bt('emptyServiceYamlError'));
+      throw new UserFacingError('emptyServiceYamlError');
     }
     const parsed = YAML.parseDocument(trimmed);
     if (parsed.errors.length > 0) {
@@ -402,7 +403,7 @@ export class YamlService {
     }
     const obj = parsed.toJSON();
     if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
-      throw new Error(bt('invalidServiceYamlObject'));
+      throw new UserFacingError('invalidServiceYamlObject');
     }
     if (obj.services && typeof obj.services === 'object' && !Array.isArray(obj.services)) {
       const inner = obj.services[serviceName];

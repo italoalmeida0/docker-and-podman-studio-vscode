@@ -37,6 +37,7 @@ export interface PodContainerSummary {
   id: string;
   name: string;
   status: string;
+  state?: ServiceStatus;
   restartCount: number;
 }
 
@@ -381,6 +382,7 @@ export const OutboundCommand = {
   ACTION_RESULT: 'action:result',
   NOTIFICATION: 'notification',
   ERROR: 'error',
+  ERROR_RESOLVED: 'error:resolved',
   SYSTEM_INFO_UPDATE: 'system:info:update',
   DISK_USAGE_UPDATE: 'system:df:update',
   DOCKER_CONTEXTS_UPDATE: 'contexts:update',

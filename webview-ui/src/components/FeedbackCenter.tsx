@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { AlertCircle, CheckCircle2, Info, LoaderCircle, X } from 'lucide-react';
+import { AlertCircle, AlertTriangle, CheckCircle2, Info, LoaderCircle, X } from 'lucide-react';
+import { failureSeverity, formatFailureSummary } from '../../../src/shared/failureMessages';
 import { fmt, useI18n } from '../i18n';
 import { useFeedbackTexts } from '../i18n/feedback';
+import { localizedOperationLabel } from '../operationLabels';
 import { BannerToast, StudioOperation, useStudioStore } from '../store';
 import { postStudioMessage } from '../vscode';
 
@@ -23,7 +25,7 @@ function mayTakeLonger(key: string): boolean {
 }
 
 const OperationCard: React.FC<{ operation: StudioOperation; now: number }> = ({ operation, now }) => {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const text = useFeedbackTexts();
   const [expanded, setExpanded] = useState(false);
   const follow = useRef(true);
@@ -41,7 +43,7 @@ const OperationCard: React.FC<{ operation: StudioOperation; now: number }> = ({ 
     <div className="rounded-lg border border-panel-border bg-panel-bg px-3 py-2.5 text-xs text-text-primary">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
         <LoaderCircle aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none text-accent-purple" />
-        <span className="font-medium break-words">{operation.label}</span>
+        <span className="font-medium break-words">{localizedOperationLabel(operation, locale, t)}</span>
         <span className="text-text-secondary tabular-nums">{fmt(text.elapsed, { time: formatElapsed(elapsed) })}</span>
         {operation.total !== undefined && operation.completed !== undefined && (
           <span className="text-text-secondary">
@@ -78,11 +80,12 @@ const OperationCard: React.FC<{ operation: StudioOperation; now: number }> = ({ 
 };
 
 const NotificationCard: React.FC<{ banner: BannerToast }> = ({ banner }) => {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const text = useFeedbackTexts();
   const { dismissBanner, pauseBanner, resumeBanner } = useStudioStore();
   const paused = useStudioStore((state) => Boolean(state.pausedBanners[banner.id]));
   const [expanded, setExpanded] = useState(false);
+  const warning = banner.type === 'error' && failureSeverity(banner.failure) === 'warning';
 
   useEffect(() => {
     if (!expanded) return;
@@ -98,21 +101,36 @@ const NotificationCard: React.FC<{ banner: BannerToast }> = ({ banner }) => {
 
   return (
     <div
-      role={banner.type === 'error' ? 'alert' : 'status'}
+      role={banner.type === 'error' && !warning ? 'alert' : 'status'}
       className={`rounded-lg border bg-panel-bg px-3 py-2.5 text-xs text-text-primary ${
-        banner.type === 'error' ? 'border-accent-red' :
+        warning ? 'border-accent-orange' :
+          banner.type === 'error' ? 'border-accent-red' :
           banner.type === 'success' ? 'border-accent-green' : 'border-panel-border'
       }`}
     >
       <div className="flex items-start gap-2">
-        {banner.type === 'error' ? (
+        {warning ? (
+          <AlertTriangle aria-hidden="true" className="h-4 w-4 shrink-0 text-accent-orange" />
+        ) : banner.type === 'error' ? (
           <AlertCircle aria-hidden="true" className="h-4 w-4 shrink-0 text-accent-red" />
         ) : banner.type === 'success' ? (
           <CheckCircle2 aria-hidden="true" className="h-4 w-4 shrink-0 text-accent-green" />
         ) : (
           <Info aria-hidden="true" className="h-4 w-4 shrink-0 text-accent-purple" />
         )}
-        <span className="min-w-0 flex-1 break-words">{banner.message}</span>
+        <span className="min-w-0 flex-1 break-words">
+          {banner.failure ? formatFailureSummary(
+            locale, banner.failure, banner.failure.operationKey
+              ? localizedOperationLabel({
+                  key: banner.failure.operationKey,
+                  label: banner.failure.operation || '',
+                  labelLocale: banner.failure.operationLocale,
+                }, locale, t)
+              : undefined
+          ) : banner.operation
+            ? fmt(text.completed, { operation: localizedOperationLabel(banner.operation, locale, t) })
+            : banner.message}
+        </span>
         <button
           type="button"
           aria-label={t.common.close}
@@ -144,7 +162,7 @@ const NotificationCard: React.FC<{ banner: BannerToast }> = ({ banner }) => {
 };
 
 export const FeedbackCenter: React.FC = () => {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const text = useFeedbackTexts();
   const { banners, operationTokens, operationInProgress, operationLabels } = useStudioStore();
   const operations = Object.values(operationTokens);
@@ -160,11 +178,11 @@ export const FeedbackCenter: React.FC = () => {
   if (banners.length === 0 && !operationInProgress) return null;
 
   return (
-    <div className="shrink-0 bg-panel-card px-6 pt-3">
-      <div className="max-h-[45vh] overflow-y-auto space-y-2 pb-3">
+    <div className="shrink-0 bg-panel-card px-3 sm:px-6 pt-3">
+      <div className="max-h-[30vh] overflow-y-auto space-y-2 pb-3">
         {[...banners].reverse().map((banner) => <NotificationCard key={banner.id} banner={banner} />)}
         <div role="status" className="sr-only">
-          {operations.map((operation) => operation.label).join('. ')}
+          {operations.map((operation) => localizedOperationLabel(operation, locale, t)).join('. ')}
         </div>
         {operations.map((operation) => <OperationCard key={operation.id} operation={operation} now={now} />)}
         {operations.length === 0 && operationInProgress && (

@@ -39,6 +39,7 @@ import { displayEnvironmentValue, environmentLines } from '../composeSecrets';
 import { composeLogKey, composeLogReplicaSignature } from '../../../src/shared/composeLogs';
 import { ComposeBuilderSpec, validateComposeBuilder } from '../../../src/shared/composeBuilder';
 import { applyVisualServiceDraft, createVisualServiceDraft } from '../../../src/shared/composeVisualEdit';
+import { describeComposeVisualError } from '../../../src/shared/composeVisualMessages';
 import { useI18n } from '../i18n';
 import { useComposeExtras } from '../i18n/composeExtras';
 import { useFeedbackTexts } from '../i18n/feedback';
@@ -74,7 +75,7 @@ function toStringList(value: any): string[] {
 }
 
 export const ComposePage: React.FC = () => {
-  const { t, fmt, engine, engineLabel } = useI18n();
+  const { t, fmt, engine, engineLabel, locale } = useI18n();
   const extra = useComposeExtras();
   const feedback = useFeedbackTexts();
   const { postMessage, onMessage } = useVsCodeMessaging();
@@ -111,12 +112,16 @@ export const ComposePage: React.FC = () => {
   const [scaleReplicas, setScaleReplicas] = useState('');
   const scaleService = useActionRequest('stack:scale', () => setScaleTarget(null));
   const [showSensitive, setShowSensitive] = useState(false);
-  const [serviceEditError, setServiceEditError] = useState('');
+  const [serviceEditError, setServiceEditError] = useState<Error | string | null>(null);
+  const serviceEditPresentation = serviceEditError !== null
+    ? describeComposeVisualError(locale, serviceEditError) : null;
+  const captureServiceEditError = (error: unknown) =>
+    setServiceEditError(error instanceof Error ? error : String(error));
 
   useEffect(() => {
     setScaleTarget(null);
     setShowProjectOptions(false);
-    setServiceEditError('');
+    setServiceEditError(null);
   }, [activeFile, engine]);
 
   const draft = activeFile ? composeDrafts[activeFile] : undefined;
@@ -205,8 +210,8 @@ export const ComposePage: React.FC = () => {
   }), [bName, bContainerName, bSource, bImage, bBuildImage, bBuildContext, bDockerfile,
     bPorts, bRestart, bVolumes, bEnv, bDepends, bCommand]);
   const builderErrors = useMemo(
-    () => validateComposeBuilder(builderSpec, document?.services || {}),
-    [builderSpec, document]
+    () => validateComposeBuilder(builderSpec, document?.services || {}, locale),
+    [builderSpec, document, locale]
   );
   builderSnapshot.current = JSON.stringify(builderSpec);
 
@@ -232,6 +237,9 @@ export const ComposePage: React.FC = () => {
   const runSelectedServices = (action: ServiceAction) => runServices(action, serviceSelection.selected);
   const selectedServicesBuildable = serviceSelection.selected.length > 0 &&
     serviceSelection.selected.every((name) => Boolean(document?.services?.[name]?.build));
+  const selectedServiceScope = tab === 'services' && serviceSelection.selected.length > 0;
+  const scopedLabel = (label: string) => selectedServiceScope
+    ? `${label} (${serviceSelection.selected.length})` : label;
 
   const summaryByService = useMemo(() => {
     const map = new Map<string, ReturnType<typeof summarizeComposeService>>();
@@ -398,9 +406,9 @@ export const ComposePage: React.FC = () => {
   ];
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full min-h-0">
       {/* Studio Compose Top Header */}
-      <div className="px-6 py-4 border-b border-panel-border bg-panel-card space-y-3">
+      <div className="studio-page-header px-3 sm:px-6 py-4 border-b border-panel-border bg-panel-card space-y-3">
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div className="min-w-0">
             <div className="flex items-center gap-2.5 flex-wrap">
@@ -442,7 +450,7 @@ export const ComposePage: React.FC = () => {
               <select
                 value={activeFile || ''}
                 onChange={(e) => postMessage('compose:file:select', { file: e.target.value })}
-                className="input-field w-64 py-1.5 text-xs font-mono"
+                className="input-field w-64 max-w-full py-1.5 text-xs font-mono"
               >
                 {composeFiles.map((f) => {
                   const parts = f.replace(/\\/g, '/').split('/');
@@ -470,13 +478,13 @@ export const ComposePage: React.FC = () => {
 
         {/* Stack Action Toolbar + Sub-navigation Tabs */}
         <div className="flex items-center justify-between gap-4 pt-1 flex-wrap">
-          <div className="flex items-center gap-1 overflow-x-auto">
+          <div className="flex items-center gap-1 min-w-0 max-w-full overflow-x-auto">
             {tabs.map((tabItem) => (
               <button
                 key={tabItem.id}
                 type="button"
                 onClick={() => setTab(tabItem.id)}
-                className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors flex items-center gap-1.5 border ${
+                className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors flex shrink-0 items-center gap-1.5 border ${
                   tab === tabItem.id
                     ? 'bg-white/[0.09] text-text-primary border-white/[0.12] shadow-sm'
                     : 'border-transparent text-text-secondary hover:text-text-primary hover:bg-white/[0.04]'
@@ -493,65 +501,74 @@ export const ComposePage: React.FC = () => {
           </div>
 
           {activeFile && (
-            <div className="flex items-center gap-1.5 flex-wrap">
+            <div role="toolbar" aria-label={selectedServiceScope ? feedback.selectedServices : feedback.wholeProject}
+              className="flex items-center gap-2 flex-wrap">
+              {tab === 'services' && (
+                <SelectionBar selection={serviceSelection} busy={busy} inline />
+              )}
+              <span className="text-[11px] font-medium text-text-secondary">
+                {selectedServiceScope ? feedback.selectedServices : feedback.wholeProject}
+              </span>
               <ActionPillButton
-                label={t.common.upStart}
+                label={scopedLabel(t.common.upStart)}
                 variant="primary"
-                loading={Boolean(operationsInProgress.start)}
+                loading={Boolean(operationsInProgress[selectedServiceScope ? 'compose-up-batch' : 'start'])}
                 loadingLabel={t.common.startingOp}
                 disabled={busy || projectActionsBlocked}
+                title={selectedServiceScope ? extra.batchStartHint : undefined}
                 icon={<Play className="w-3.5 h-3.5" />}
-                onClick={() => postMessage('stack:up', actionContext)}
+                onClick={() => selectedServiceScope ? runSelectedServices('up') : postMessage('stack:up', actionContext)}
               />
               <ActionPillButton
-                label={t.common.stop}
-                loading={Boolean(operationsInProgress.stop)}
+                label={scopedLabel(t.common.stop)}
+                loading={Boolean(operationsInProgress[selectedServiceScope ? 'compose-stop-batch' : 'stop'])}
                 loadingLabel={t.common.stoppingOp}
                 disabled={busy || !projectReady}
                 icon={<Square className="w-3.5 h-3.5" />}
-                onClick={() => postMessage('stack:stop', actionContext)}
+                onClick={() => selectedServiceScope ? runSelectedServices('stop') : postMessage('stack:stop', actionContext)}
               />
               <ActionPillButton
-                label={t.common.restart}
-                loading={Boolean(operationsInProgress.restart)}
+                label={scopedLabel(t.common.restart)}
+                loading={Boolean(operationsInProgress[selectedServiceScope ? 'compose-restart-batch' : 'restart'])}
                 loadingLabel={t.common.restartingOp}
                 disabled={busy || projectActionsBlocked}
                 icon={<RotateCcw className="w-3.5 h-3.5" />}
-                onClick={() => postMessage('stack:restart', actionContext)}
+                onClick={() => selectedServiceScope ? runSelectedServices('restart') : postMessage('stack:restart', actionContext)}
               />
               <ActionPillButton
-                label={t.common.build}
-                loading={Boolean(operationsInProgress.build)}
+                label={scopedLabel(t.common.build)}
+                loading={Boolean(operationsInProgress[selectedServiceScope ? 'compose-build-batch' : 'build'])}
                 loadingLabel={t.common.buildingOp}
-                disabled={busy || projectActionsBlocked}
-                title={extra.buildOnlyHint}
+                disabled={busy || projectActionsBlocked || (selectedServiceScope && !selectedServicesBuildable)}
+                title={selectedServiceScope && !selectedServicesBuildable ? extra.selectedBuildHint : extra.buildOnlyHint}
                 icon={<Hammer className="w-3.5 h-3.5" />}
-                onClick={() => postMessage('stack:build', actionContext)}
+                onClick={() => selectedServiceScope ? runSelectedServices('build') : postMessage('stack:build', actionContext)}
               />
               <ActionPillButton
-                label={extra.rebuild}
-                loading={Boolean(operationsInProgress.rebuild)}
-                disabled={busy || projectActionsBlocked}
-                title={extra.rebuildHint}
+                label={scopedLabel(extra.rebuild)}
+                loading={Boolean(operationsInProgress[selectedServiceScope ? 'compose-rebuild-batch' : 'rebuild'])}
+                disabled={busy || projectActionsBlocked || (selectedServiceScope && !selectedServicesBuildable)}
+                title={selectedServiceScope && !selectedServicesBuildable ? extra.selectedBuildHint : extra.rebuildHint}
                 icon={<Hammer className="w-3.5 h-3.5" />}
-                onClick={() => postMessage('stack:build', { ...actionContext, noCache: true })}
+                onClick={() => selectedServiceScope ? runSelectedServices('rebuild') :
+                  postMessage('stack:build', { ...actionContext, noCache: true })}
               />
               <ActionPillButton
-                label={extra.buildUp}
-                loading={Boolean(operationsInProgress['build-up'])}
-                disabled={busy || projectActionsBlocked}
-                title={extra.buildUpHint}
+                label={scopedLabel(extra.buildUp)}
+                loading={Boolean(operationsInProgress[selectedServiceScope ? 'compose-build-up-batch' : 'build-up'])}
+                disabled={busy || projectActionsBlocked || (selectedServiceScope && !selectedServicesBuildable)}
+                title={selectedServiceScope && !selectedServicesBuildable ? extra.selectedBuildHint : extra.buildUpHint}
                 icon={<Play className="w-3.5 h-3.5" />}
-                onClick={() => postMessage('stack:build:up', actionContext)}
+                onClick={() => selectedServiceScope ? runSelectedServices('build-up') : postMessage('stack:build:up', actionContext)}
               />
               <ActionPillButton
-                label={t.common.down}
+                label={scopedLabel(t.common.down)}
                 variant="danger"
-                loading={Boolean(operationsInProgress.down)}
+                loading={Boolean(operationsInProgress[selectedServiceScope ? 'compose-down-batch' : 'down'])}
                 loadingLabel={t.common.removingOp}
                 disabled={busy || !projectReady}
                 icon={<Trash2 className="w-3.5 h-3.5" />}
-                onClick={() => postMessage('stack:down', actionContext)}
+                onClick={() => selectedServiceScope ? runSelectedServices('down') : postMessage('stack:down', actionContext)}
               />
             </div>
           )}
@@ -559,7 +576,7 @@ export const ComposePage: React.FC = () => {
       </div>
 
       {/* Main Workspace Area */}
-      <div className="flex-1 overflow-auto p-6">
+      <div className="flex-1 min-h-0 overflow-auto p-3 sm:p-6">
         {activeFile && (composeProject.resolving || composeProject.error || composeProject.customized) && (
           <div role={composeProject.error ? 'alert' : 'status'}
             className="mb-4 bg-panel-card border border-panel-border rounded-md px-4 py-2.5 text-xs text-text-secondary space-y-1">
@@ -583,8 +600,8 @@ export const ComposePage: React.FC = () => {
           </div>
         )}
         {activeFile && yamlDirty && tab !== 'yaml' && (
-          <div role="status" className="mb-4 bg-yellow-500/10 border border-accent-orange rounded-md px-4 py-2.5 text-xs text-accent-orange flex items-center justify-between gap-3">
-            <span>{yamlConflict ? extra.draftConflict : extra.draftPending}</span>
+          <div role="status" className="mb-4 bg-yellow-500/10 border border-accent-orange rounded-md px-4 py-2.5 text-xs text-accent-orange flex flex-wrap items-center justify-between gap-3">
+            <span className="min-w-0 break-words">{yamlConflict ? extra.draftConflict : extra.draftPending}</span>
             <SmallActionButton label={extra.openYaml} onClick={() => setTab('yaml')} />
           </div>
         )}
@@ -775,56 +792,6 @@ export const ComposePage: React.FC = () => {
             {/* TAB 3: SERVICES */}
             {tab === 'services' && (
               <div className="space-y-3">
-                <SelectionBar selection={serviceSelection} busy={busy}>
-                  <SmallActionButton
-                    label={`${t.common.start} (${serviceSelection.selected.length})`}
-                    accent
-                    disabled={busy || projectActionsBlocked}
-                    icon={<Play className="w-3 h-3" />}
-                    title={extra.batchStartHint}
-                    onClick={() => runSelectedServices('up')}
-                  />
-                  <SmallActionButton
-                    label={`${t.common.stop} (${serviceSelection.selected.length})`}
-                    disabled={busy || !projectReady}
-                    icon={<Square className="w-3 h-3" />}
-                    onClick={() => runSelectedServices('stop')}
-                  />
-                  <SmallActionButton
-                    label={`${t.common.restart} (${serviceSelection.selected.length})`}
-                    disabled={busy || projectActionsBlocked}
-                    icon={<RotateCcw className="w-3 h-3" />}
-                    onClick={() => runSelectedServices('restart')}
-                  />
-                  <SmallActionButton
-                    label={`${t.common.build} (${serviceSelection.selected.length})`}
-                    disabled={busy || projectActionsBlocked || !selectedServicesBuildable}
-                    icon={<Hammer className="w-3 h-3" />}
-                    title={selectedServicesBuildable ? extra.buildOnlyHint : extra.selectedBuildHint}
-                    onClick={() => runSelectedServices('build')}
-                  />
-                  <SmallActionButton
-                    label={`${extra.rebuild} (${serviceSelection.selected.length})`}
-                    disabled={busy || projectActionsBlocked || !selectedServicesBuildable}
-                    icon={<Hammer className="w-3 h-3" />}
-                    title={selectedServicesBuildable ? extra.rebuildHint : extra.selectedBuildHint}
-                    onClick={() => runSelectedServices('rebuild')}
-                  />
-                  <SmallActionButton
-                    label={`${extra.buildUp} (${serviceSelection.selected.length})`}
-                    disabled={busy || projectActionsBlocked || !selectedServicesBuildable}
-                    icon={<Play className="w-3 h-3" />}
-                    title={selectedServicesBuildable ? extra.buildUpHint : extra.selectedBuildHint}
-                    onClick={() => runSelectedServices('build-up')}
-                  />
-                  <SmallActionButton
-                    label={`${t.common.down} (${serviceSelection.selected.length})`}
-                    danger
-                    disabled={busy || !projectReady}
-                    icon={<Trash2 className="w-3 h-3" />}
-                    onClick={() => runSelectedServices('down')}
-                  />
-                </SelectionBar>
                 {serviceSelection.selected.length > 0 && (
                   <p className="text-xs text-text-secondary">{extra.batchStartHint}</p>
                 )}
@@ -970,13 +937,13 @@ export const ComposePage: React.FC = () => {
                             icon={isActive ? <Lock className="w-3 h-3" /> : <Edit3 className="w-3 h-3" />}
                             onClick={() => {
                               setExpandedServices((prev) => ({ ...prev, [svcName]: true }));
-                              setServiceEditError('');
+                              setServiceEditError(null);
                               let visual;
                               try {
                                 visual = createVisualServiceDraft(serviceFragments[svcName]);
                               } catch (error) {
                                 visual = undefined;
-                                setServiceEditError(error instanceof Error ? error.message : String(error));
+                                captureServiceEditError(error);
                               }
                               setComposeServiceDraft(activeFile, {
                                 name: svcName, base: rawYaml, text: serviceFragments[svcName], visual,
@@ -1018,17 +985,17 @@ export const ComposePage: React.FC = () => {
                         <div className="border-t border-panel-border bg-panel-bg p-4 space-y-4">
                           {isEditing ? (
                             <div className="space-y-3">
-                              <div className="flex items-center justify-between">
-                                <span className="text-xs font-medium text-text-primary">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <span className="min-w-0 break-words text-xs font-medium text-text-primary">
                                   {t.compose.editingServiceHeader}{' '}
                                   <code className="font-mono text-accent-purple">{svcName}</code>
                                 </span>
-                                <div className="flex items-center gap-2">
+                                <div className="flex flex-wrap items-center gap-2">
                                   <SmallActionButton
                                     label={t.common.cancel}
                                     disabled={savingService}
                                     onClick={() => {
-                                      setServiceEditError('');
+                                      setServiceEditError(null);
                                       setComposeServiceDraft(activeFile, null);
                                     }}
                                   />
@@ -1047,10 +1014,10 @@ export const ComposePage: React.FC = () => {
                                           ? applyVisualServiceDraft(serviceDraft.visual)
                                           : serviceDraft.text;
                                       } catch (error) {
-                                        setServiceEditError(error instanceof Error ? error.message : String(error));
+                                        captureServiceEditError(error);
                                         return;
                                       }
-                                      setServiceEditError('');
+                                      setServiceEditError(null);
                                       postMessage('service:update', {
                                         ...editContext,
                                         baseYaml: serviceDraft?.base,
@@ -1064,7 +1031,18 @@ export const ComposePage: React.FC = () => {
                               {serviceDraft?.base !== rawYaml && (
                                 <p role="alert" className="text-xs text-accent-orange">{extra.serviceConflict}</p>
                               )}
-                              {serviceEditError && <p role="alert" className="text-xs text-accent-orange">{serviceEditError}</p>}
+                              {serviceEditPresentation && (
+                                <div role="alert" className="text-xs text-accent-orange">
+                                  <p>{serviceEditPresentation.summary}</p>
+                                  {serviceEditPresentation.details &&
+                                    serviceEditPresentation.details !== serviceEditPresentation.summary && (
+                                      <details className="mt-1 text-text-primary">
+                                        <summary className="cursor-pointer underline underline-offset-2">{feedback.showDetails}</summary>
+                                        <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono">{serviceEditPresentation.details}</pre>
+                                      </details>
+                                    )}
+                                </div>
+                              )}
                               <div className="flex gap-2">
                                 <SmallActionButton label={extra.visualEdit} disabled={Boolean(serviceDraft?.visual)}
                                   onClick={() => {
@@ -1073,9 +1051,9 @@ export const ComposePage: React.FC = () => {
                                       setComposeServiceDraft(activeFile, {
                                         ...serviceDraft, visual: createVisualServiceDraft(serviceDraft.text),
                                       });
-                                      setServiceEditError('');
+                                      setServiceEditError(null);
                                     } catch (error) {
-                                      setServiceEditError(error instanceof Error ? error.message : String(error));
+                                      captureServiceEditError(error);
                                     }
                                   }} />
                                 <SmallActionButton label={extra.yamlEdit} disabled={!serviceDraft?.visual}
@@ -1084,9 +1062,9 @@ export const ComposePage: React.FC = () => {
                                     try {
                                       const text = applyVisualServiceDraft(serviceDraft.visual);
                                       setComposeServiceDraft(activeFile, { ...serviceDraft, text, visual: undefined });
-                                      setServiceEditError('');
+                                      setServiceEditError(null);
                                     } catch (error) {
-                                      setServiceEditError(error instanceof Error ? error.message : String(error));
+                                      captureServiceEditError(error);
                                     }
                                   }} />
                               </div>
@@ -1216,8 +1194,8 @@ export const ComposePage: React.FC = () => {
                     description={t.compose.emptyVarsDesc}
                   />
                 ) : (
-                  <div className="bg-panel-card border border-panel-border rounded-md overflow-hidden shadow-card">
-                    <table className="w-full text-xs">
+                  <div className="bg-panel-card border border-panel-border rounded-md overflow-x-auto shadow-card">
+                    <table className="w-full min-w-[500px] text-xs">
                       <thead>
                         <tr className="border-b border-panel-border bg-panel-bg text-left text-text-secondary">
                           <th className="px-4 py-3 font-medium">{t.compose.colService}</th>
@@ -1252,7 +1230,7 @@ export const ComposePage: React.FC = () => {
                       count: Object.keys(document.networks || {}).length,
                     })}
                   </div>
-                  <div className="grid grid-cols-[1fr_120px_auto] gap-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_120px_auto] gap-2">
                     <input
                       type="text"
                       value={newNetName}
@@ -1313,7 +1291,7 @@ export const ComposePage: React.FC = () => {
                       count: Object.keys(document.volumes || {}).length,
                     })}
                   </div>
-                  <div className="grid grid-cols-[1fr_120px_auto] gap-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_120px_auto] gap-2">
                     <input
                       type="text"
                       value={newVolName}
@@ -1372,7 +1350,7 @@ export const ComposePage: React.FC = () => {
             {tab === 'yaml' && (
               <div className="space-y-3 h-full flex flex-col">
                 {composeParseError && (
-                  <div role="alert" className="bg-red-500/10 border border-accent-red rounded-md px-4 py-2.5 text-xs text-accent-red">
+                  <div role="status" className="bg-yellow-500/10 border border-accent-orange rounded-md px-4 py-2.5 text-xs text-accent-orange">
                     {extra.invalidYaml}
                     <details className="mt-2 text-text-primary">
                       <summary className="cursor-pointer underline underline-offset-2">{feedback.showDetails}</summary>
@@ -1400,8 +1378,8 @@ export const ComposePage: React.FC = () => {
                 )}
                 {serviceDraft && <p className="text-xs text-accent-orange">{extra.finishServiceEdit}</p>}
                 {stackHasActiveContainers && (
-                  <div className="bg-yellow-500/10 border border-accent-orange rounded-md px-4 py-2.5 text-xs text-accent-orange flex items-center justify-between gap-3">
-                    <span className="flex items-center gap-2">
+                  <div className="bg-yellow-500/10 border border-accent-orange rounded-md px-4 py-2.5 text-xs text-accent-orange flex flex-wrap items-center justify-between gap-3">
+                    <span className="min-w-0 flex items-center gap-2">
                       <Lock className="w-4 h-4 shrink-0" />
                       {fmt(t.compose.yamlLockedBanner, { engine: engineLabel })}
                     </span>
@@ -1413,9 +1391,9 @@ export const ComposePage: React.FC = () => {
                   </div>
                 )}
 
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-mono text-text-secondary">{activeFile}</span>
-                  <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="min-w-0 break-all text-xs font-mono text-text-secondary">{activeFile}</span>
+                  <div className="flex flex-wrap items-center gap-2">
                     <SmallActionButton
                       label={yamlConflict ? extra.reloadDraft : t.compose.restoreOriginal}
                       disabled={savingYaml || (!yamlDirty && yamlDraft === rawYaml)}
@@ -1473,14 +1451,14 @@ export const ComposePage: React.FC = () => {
                     ))}
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex w-full min-w-0 flex-wrap items-center gap-2 sm:w-auto">
                     <label className="text-xs text-text-secondary" htmlFor="compose-log-replica">{extra.logReplica}</label>
                     <select id="compose-log-replica" value={selectedLogContainer}
                       onChange={(event) => {
                         setSelectedLogContainer(event.target.value);
                         setLogPaused(false);
                       }}
-                      className="input-field w-48 py-1 text-xs">
+                      className="input-field w-full py-1 text-xs sm:w-48">
                       <option value="">{extra.allReplicas}</option>
                       {composeContainers.filter((item) => item.service === selectedLogService && item.fullId).map((item) => (
                         <option key={item.fullId} value={item.fullId}>{item.name || item.id}</option>
@@ -1491,7 +1469,7 @@ export const ComposePage: React.FC = () => {
                       value={logFilter}
                       onChange={(e) => setLogFilter(e.target.value)}
                       placeholder={t.compose.filterLinesPlaceholder}
-                      className="input-field w-56 py-1 text-xs"
+                      className="input-field w-full py-1 text-xs sm:w-56"
                     />
                     <SmallActionButton label={t.common.clear} onClick={() => {
                       postMessage('logs:clear', {

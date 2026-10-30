@@ -70,9 +70,9 @@ export const DashboardPage: React.FC = () => {
   );
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full min-h-0">
       {/* Header */}
-      <div className="px-6 py-4 border-b border-panel-border bg-panel-card flex items-center justify-between gap-4 flex-wrap">
+      <div className="studio-page-header px-3 sm:px-6 py-4 border-b border-panel-border bg-panel-card flex items-center justify-between gap-4 flex-wrap">
         <div>
           <div className="flex items-center gap-2.5">
             <h1 className="text-[17px] font-semibold tracking-tight text-text-primary">
@@ -108,7 +108,7 @@ export const DashboardPage: React.FC = () => {
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 overflow-auto p-6 space-y-5">
+      <div className="flex-1 min-h-0 overflow-auto p-3 sm:p-6 space-y-5">
         {/* Summary KPI Cards */}
         <div className="grid grid-cols-4 gap-3.5">
           <div onClick={() => setActivePage('containers')} className="cursor-pointer">

@@ -23,18 +23,21 @@ import {
   StatusBadge,
 } from '../components/Shared';
 import { useI18n } from '../i18n';
-import { PodmanPod, useStudioStore } from '../store';
+import { useFeedbackTexts } from '../i18n/feedback';
+import { PodmanPod, ServiceStatus, useStudioStore } from '../store';
 import { useActionRequest } from '../useActionRequest';
 import { useVsCodeMessaging } from '../vscode';
 
 export const PodGroups: React.FC<{
   visiblePods: PodmanPod[];
+  statusForPod: (pod: PodmanPod) => ServiceStatus;
   expandedPods: Record<string, boolean>;
   onTogglePod: (id: string) => void;
   renderContainers: (pod: PodmanPod) => React.ReactNode;
-}> = ({ visiblePods, expandedPods, onTogglePod, renderContainers }) => {
+}> = ({ visiblePods, statusForPod, expandedPods, onTogglePod, renderContainers }) => {
   const { postMessage } = useVsCodeMessaging();
   const { t, fmt } = useI18n();
+  const feedback = useFeedbackTexts();
   const {
     pods,
     networks,
@@ -112,6 +115,7 @@ export const PodGroups: React.FC<{
       <PodmanBatchActions
         selection={selection}
         busy={busy}
+        resourceLabel={t.pods.title}
         onAction={(action, ids) => postMessage('pod:batch', { action, ids })}
       />
 
@@ -140,7 +144,7 @@ export const PodGroups: React.FC<{
                       className="flex items-center gap-3 min-w-0 flex-1 cursor-pointer"
                       onClick={() => onTogglePod(podKey)}
                     >
-                      <StatusBadge status={pod.state} />
+                      <StatusBadge status={statusForPod(pod)} title={feedback.groupStatusHint} />
                       <div className="min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="font-semibold text-sm text-text-primary truncate">

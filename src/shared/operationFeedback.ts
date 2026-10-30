@@ -1,3 +1,5 @@
+import type { SupportedLocale } from '../config';
+
 export type OperationEvent =
   | { type: 'output'; text: string }
   | { type: 'step'; completed: number; total: number; current?: string };
@@ -6,6 +8,7 @@ export interface OperationSnapshot {
   id: string;
   key: string;
   label: string;
+  labelLocale?: SupportedLocale;
   elapsedMs: number;
   output: string;
   outputTruncated: boolean;
@@ -31,6 +34,7 @@ export function appendOutputTail(
 export type FailureKind =
   | 'timeout'
   | 'missingExecutable'
+  | 'missingFile'
   | 'diskSpace'
   | 'portInUse'
   | 'registryAuth'
@@ -38,15 +42,22 @@ export type FailureKind =
   | 'imageNotFound'
   | 'engineConnection'
   | 'network'
+  | 'unsavedChanges'
+  | 'staleResource'
+  | 'resourceInUse'
+  | 'invalidInput'
   | 'generic';
 
 export function classifyFailure(message: string, errorCode?: string): FailureKind {
   const text = message.toLowerCase();
-  if (errorCode === 'ETIMEDOUT' || /execution timed out \(\d+s\)/i.test(message)) {
+  if (errorCode === 'ETIMEDOUT' || /\bETIMEDOUT\b|execution timed out \(\d+s\)/i.test(message)) {
     return 'timeout';
   }
-  if (errorCode === 'ENOENT' || /executable file not found|command not found|no such file or directory.*(?:executable|command)/i.test(text)) {
+  if (/\bspawn\s+\S+.*\bENOENT\b|executable file not found|command not found|no such file or directory.*(?:executable|command)/i.test(message)) {
     return 'missingExecutable';
+  }
+  if (errorCode === 'ENOENT' || /\bENOENT\b.*\bno such file or directory\b/i.test(message)) {
+    return 'missingFile';
   }
   if (/no space left on device|disk (?:is )?full|not enough (?:disk )?space/i.test(text)) {
     return 'diskSpace';
@@ -66,8 +77,21 @@ export function classifyFailure(message: string, errorCode?: string): FailureKin
   if (/cannot connect to (?:the )?(?:docker|podman)|unable to connect to podman|is the (?:docker|podman) daemon running|connection refused.*(?:podman|docker)|podman machine.*(?:not running|stopped)/i.test(text)) {
     return 'engineConnection';
   }
-  if (/network is unreachable|no such host|temporary failure in name resolution|dns lookup|connection timed out|registry request timed out/i.test(text)) {
+  if (/^(?:ECONNREFUSED|ECONNRESET|ECONNABORTED|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|ENETDOWN|EPIPE)$/i.test(errorCode || '') ||
+      /\b(?:ECONNREFUSED|ECONNRESET|ECONNABORTED|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|ENETDOWN)\b|network is unreachable|no such host|temporary failure in name resolution|dns lookup|connection timed out|registry request timed out|socket hang up|network socket disconnected/i.test(text)) {
     return 'network';
+  }
+  if (/unsaved (?:vs code |editor )?changes|save or discard unsaved/i.test(text)) {
+    return 'unsavedChanges';
+  }
+  if (/(?:project|file|settings|resource|engine|selection|replicas?).*(?:changed|no longer exists)|(?:changed|no longer exists).*(?:project|file|settings|resource|engine|selection|replicas?)/i.test(text)) {
+    return 'staleResource';
+  }
+  if (/\bin use\b|referenced by|has dependent containers|stop .* before (?:modifying|removing)/i.test(text)) {
+    return 'resourceInUse';
+  }
+  if (/^(?:invalid (?:compose (?:project options|selection|service)|resource (?:type|selection)|podman batch operation)|(?:an? )?(?:image|name|service|file|path|value|username|url)\b.*\brequired\b|(?:provide|select|enter) \b|(?:compose (?:file|stop_grace_period|scaling)|the (?:long operation timeout|active compose file)|profile names)\b.*\bmust (?:be|have|contain|use)\b)/i.test(text)) {
+    return 'invalidInput';
   }
   return 'generic';
 }

@@ -132,9 +132,9 @@ export const ImagesPage: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full min-h-0">
       {/* Header */}
-      <div className="px-6 py-4 border-b border-panel-border bg-panel-card flex items-center justify-between gap-4 flex-wrap">
+      <div className="studio-page-header px-3 sm:px-6 py-4 border-b border-panel-border bg-panel-card flex items-center justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-lg font-semibold text-text-primary flex items-center gap-2">
             <Layers
@@ -163,10 +163,10 @@ export const ImagesPage: React.FC = () => {
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 overflow-auto p-6 space-y-5">
+      <div className="flex-1 min-h-0 overflow-auto p-3 sm:p-6 space-y-5">
         {/* Pull Bar */}
         <div className="bg-panel-card border border-panel-border rounded-md p-4 shadow-card flex items-center gap-3 flex-wrap">
-          <div className="flex-1 min-w-[260px]">
+          <div className="flex-1 min-w-0 basis-[200px]">
             <input
               type="text"
               value={pullName}
@@ -214,7 +214,7 @@ export const ImagesPage: React.FC = () => {
 
         {/* Filter + Prune Toolbar */}
         <div className="flex items-center justify-between gap-3 flex-wrap">
-          <div className="relative flex-1 min-w-[220px]">
+          <div className="relative flex-1 min-w-0 basis-[180px]">
             <Search className="w-4 h-4 text-text-muted absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
@@ -250,34 +250,37 @@ export const ImagesPage: React.FC = () => {
               ))}
             </div>
 
-            <SmallActionButton
-              label={t.images.pruneDanglingBtn}
-              disabled={busy}
-              icon={<Sparkles className="w-3 h-3" />}
-              onClick={() => postMessage('prune:images')}
-            />
-            <SmallActionButton
-              label={t.images.pruneUnusedBtn}
-              disabled={busy}
-              onClick={() => postMessage('prune:all:images')}
-            />
-            <SmallActionButton
-              label={t.images.clearBuildCacheBtn}
-              disabled={busy}
-              onClick={() => postMessage('prune:builder')}
-            />
+            <SelectionBar selection={selection} busy={busy} inline>
+              <SmallActionButton
+                label={`${t.common.delete} (${selection.selected.length})`}
+                danger
+                disabled={busy}
+                icon={<Trash2 className="w-3 h-3" />}
+                onClick={() => removeImages(selection.selected)}
+              />
+            </SelectionBar>
+            {selection.selected.length === 0 && (
+              <>
+                <SmallActionButton
+                  label={t.images.pruneDanglingBtn}
+                  disabled={busy}
+                  icon={<Sparkles className="w-3 h-3" />}
+                  onClick={() => postMessage('prune:images')}
+                />
+                <SmallActionButton
+                  label={t.images.pruneUnusedBtn}
+                  disabled={busy}
+                  onClick={() => postMessage('prune:all:images')}
+                />
+                <SmallActionButton
+                  label={t.images.clearBuildCacheBtn}
+                  disabled={busy}
+                  onClick={() => postMessage('prune:builder')}
+                />
+              </>
+            )}
           </div>
         </div>
-
-        <SelectionBar selection={selection} busy={busy}>
-          <SmallActionButton
-            label={`${t.common.delete} (${selection.selected.length})`}
-            danger
-            disabled={busy}
-            icon={<Trash2 className="w-3 h-3" />}
-            onClick={() => removeImages(selection.selected)}
-          />
-        </SelectionBar>
 
         {/* Images Table */}
         {filtered.length === 0 ? (
@@ -287,8 +290,8 @@ export const ImagesPage: React.FC = () => {
             description={t.images.emptyDesc}
           />
         ) : (
-          <div className="bg-panel-card border border-panel-border rounded-md overflow-hidden shadow-card">
-            <table className="w-full text-xs">
+          <div className="bg-panel-card border border-panel-border rounded-md overflow-x-auto shadow-card">
+            <table className="w-full min-w-[700px] text-xs">
               <thead>
                 <tr className="border-b border-panel-border text-text-secondary text-left bg-panel-bg">
                   <th className="px-4 py-3"><span className="sr-only">{t.common.selectVisible}</span></th>

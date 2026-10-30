@@ -64,9 +64,9 @@ export const NetworksPage: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full min-h-0">
       {/* Header */}
-      <div className="px-6 py-4 border-b border-panel-border bg-panel-card flex items-center justify-between gap-4 flex-wrap">
+      <div className="studio-page-header px-3 sm:px-6 py-4 border-b border-panel-border bg-panel-card flex items-center justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-lg font-semibold text-text-primary flex items-center gap-2">
             <Network
@@ -77,7 +77,7 @@ export const NetworksPage: React.FC = () => {
           <p className="text-xs text-text-secondary mt-0.5">{t.networks.subtitle}</p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <ActionPillButton
             label={t.networks.createNetworkBtn}
             variant="brand"
@@ -85,10 +85,13 @@ export const NetworksPage: React.FC = () => {
             onClick={() => setShowCreate(true)}
           />
           <ActionPillButton
-            label={`${t.common.delete} ${t.images.filterUnused}`}
+            label={selection.selected.length ? `${t.common.delete} (${selection.selected.length})` :
+              `${t.common.delete} ${t.images.filterUnused}`}
+            variant={selection.selected.length ? 'danger' : 'default'}
+            loading={Boolean(operationsInProgress['network-remove-batch'])}
             disabled={busy}
-            icon={<Sparkles className="w-3.5 h-3.5" />}
-            onClick={() => postMessage('prune:networks')}
+            icon={selection.selected.length ? <Trash2 className="w-3.5 h-3.5" /> : <Sparkles className="w-3.5 h-3.5" />}
+            onClick={() => selection.selected.length ? removeNetworks(selection.selected) : postMessage('prune:networks')}
           />
           <ActionPillButton
             label={t.common.refresh}
@@ -101,7 +104,7 @@ export const NetworksPage: React.FC = () => {
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-auto p-6 space-y-5">
+      <div className="flex-1 min-h-0 overflow-auto p-3 sm:p-6 space-y-5">
         <div className="grid grid-cols-4 gap-3">
           <StatCard
             label={t.networks.statConfigured}
@@ -126,7 +129,7 @@ export const NetworksPage: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-3 flex-wrap">
-          <div className="relative flex-1 min-w-[220px]">
+          <div className="relative flex-1 min-w-0 basis-[180px]">
             <Search className="w-4 h-4 text-text-muted absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
@@ -148,18 +151,9 @@ export const NetworksPage: React.FC = () => {
               </button>
             ))}
           </div>
+          <SelectionBar selection={selection} busy={busy} inline />
         </div>
         <p className="text-xs text-text-secondary">{t.common.usageHint}</p>
-
-        <SelectionBar selection={selection} busy={busy}>
-          <SmallActionButton
-            label={`${t.common.delete} (${selection.selected.length})`}
-            danger
-            disabled={busy}
-            icon={<Trash2 className="w-3 h-3" />}
-            onClick={() => removeNetworks(selection.selected)}
-          />
-        </SelectionBar>
 
         {filtered.length === 0 ? (
           <EmptyState
@@ -174,7 +168,7 @@ export const NetworksPage: React.FC = () => {
               return (
                 <div
                   key={n.id || n.name}
-                  className="bg-panel-card border border-panel-border rounded-md px-4 py-3.5 flex items-center justify-between gap-4 shadow-card"
+                  className="bg-panel-card border border-panel-border rounded-md px-4 py-3.5 flex items-center justify-between gap-4 flex-wrap shadow-card"
                 >
                   <input
                     type="checkbox"
@@ -183,9 +177,9 @@ export const NetworksPage: React.FC = () => {
                     disabled={busy || isDefault || n.usage !== 'unused' || !n.fullId}
                     onChange={() => selection.toggle(networkSelectionKey(n))}
                   />
-                  <div className="space-y-1 min-w-0 flex-1">
+                  <div className="space-y-1 min-w-0 flex-1 basis-[10rem]">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-semibold text-sm text-text-primary font-mono">
+                      <span className="font-semibold text-sm text-text-primary font-mono break-all">
                         {n.name}
                       </span>
                       <span className="px-2 py-0.5 text-[10px] rounded bg-panel-bg border border-panel-border text-text-secondary">
@@ -210,7 +204,7 @@ export const NetworksPage: React.FC = () => {
                         </span>
                       )}
                     </div>
-                    <div className="text-xs text-text-secondary font-mono">
+                    <div className="text-xs text-text-secondary font-mono break-words">
                       {t.networks.interfaceLabel}: {n.networkInterface || '-'} · {t.networks.subnetsLabel}:{' '}
                       {n.subnets.length > 0
                         ? n.subnets.map((s) => `${s.subnet} (gw ${s.gateway})`).join(', ')

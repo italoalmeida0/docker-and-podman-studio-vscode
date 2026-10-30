@@ -21,9 +21,11 @@ import {
   Modal,
   SmallActionButton,
   StatCard,
+  StatusBadge,
 } from '../components/Shared';
 import { buildContainerTree, containerFilterForEngine } from '../containerTree';
 import { useI18n } from '../i18n';
+import { useFeedbackTexts } from '../i18n/feedback';
 import { PodmanContainer, useStudioStore } from '../store';
 import { useActionRequest } from '../useActionRequest';
 import { useVsCodeMessaging } from '../vscode';
@@ -32,6 +34,7 @@ import { PodGroups } from './PodsPage';
 export const ContainersPage: React.FC = () => {
   const { postMessage } = useVsCodeMessaging();
   const { t, fmt, engine, engineLabel, engineCmd } = useI18n();
+  const feedback = useFeedbackTexts();
   const isPodman = engine === 'podman';
   const {
     allContainers,
@@ -81,8 +84,8 @@ export const ContainersPage: React.FC = () => {
 
   const activeFilter = containerFilterForEngine(filterTab, engine);
   const tree = useMemo(
-    () => buildContainerTree(visibleBase, pods, engine, activeFilter, search),
-    [visibleBase, pods, engine, activeFilter, search]
+    () => buildContainerTree(visibleBase, pods, engine, activeFilter, search, allContainers),
+    [visibleBase, pods, engine, activeFilter, search, allContainers]
   );
   const visiblePods = useMemo(() => tree.podGroups.map((group) => group.pod), [tree.podGroups]);
 
@@ -169,9 +172,9 @@ export const ContainersPage: React.FC = () => {
     });
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full min-h-0">
       {/* Header */}
-      <div className="px-6 py-4 border-b border-panel-border bg-panel-card flex items-center justify-between gap-4 flex-wrap">
+      <div className="studio-page-header px-3 sm:px-6 py-4 border-b border-panel-border bg-panel-card flex items-center justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-lg font-semibold text-text-primary flex items-center gap-2">
             <Box className={`w-5 h-5 ${isPodman ? 'text-accent-purple' : 'text-accent-blue'}`} />
@@ -198,7 +201,7 @@ export const ContainersPage: React.FC = () => {
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 overflow-auto p-6 space-y-5">
+      <div className="flex-1 min-h-0 overflow-auto p-3 sm:p-6 space-y-5">
         <div className="grid grid-cols-3 gap-3">
           <StatCard
             label={t.containers.statRunning}
@@ -228,7 +231,7 @@ export const ContainersPage: React.FC = () => {
 
         {/* Filters */}
         <div className="flex items-center justify-between gap-3 flex-wrap">
-          <div className="relative flex-1 min-w-[240px]">
+          <div className="relative flex-1 min-w-0 basis-[180px]">
             <Search className="w-4 h-4 text-text-muted absolute left-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
@@ -282,6 +285,7 @@ export const ContainersPage: React.FC = () => {
           <PodmanBatchActions
             selection={selection}
             busy={busy}
+            resourceLabel={t.sidebar.containers}
             onAction={(action, ids) => postMessage('container:batch', { action, ids })}
           />
         )}
@@ -289,6 +293,7 @@ export const ContainersPage: React.FC = () => {
         {isPodman && (
           <PodGroups
             visiblePods={visiblePods}
+            statusForPod={(pod) => tree.podGroups.find((group) => group.pod === pod)?.status || pod.state}
             expandedPods={expandedPods}
             onTogglePod={(id) => setExpandedPods((previous) => ({
               ...previous,
@@ -303,7 +308,7 @@ export const ContainersPage: React.FC = () => {
           />
         )}
 
-        {tree.composeGroups.map(({ project, containers }) => {
+        {tree.composeGroups.map(({ project, containers, status }) => {
           const expanded = expandedProjects[project] !== false;
           return (
             <section key={project} className="bg-panel-card border border-panel-border rounded-md overflow-hidden">
@@ -316,8 +321,11 @@ export const ContainersPage: React.FC = () => {
                 }))}
                 className="w-full px-4 py-3 flex items-center justify-between gap-3 text-left"
               >
-                <span className="font-semibold text-sm text-text-primary">
-                  Compose: {project} <span className="text-text-muted">({containers.length})</span>
+                <span className="flex items-center gap-2 min-w-0 flex-wrap">
+                  <StatusBadge status={status} title={feedback.groupStatusHint} />
+                  <span className="font-semibold text-sm text-text-primary break-all">
+                    Compose: {project} <span className="text-text-muted">({containers.length})</span>
+                  </span>
                 </span>
                 <ChevronDown className={`w-4 h-4 transition-transform ${expanded ? 'rotate-180' : ''}`} />
               </button>

@@ -33,7 +33,7 @@ import {
   ServiceStatus,
 } from '../types';
 
-const QUERY_TIMEOUT_MS = 20_000;
+const QUERY_TIMEOUT_MS = 30_000;
 const MAX_CAPTURED_ACTION_OUTPUT = 2_000_000;
 const POWERSHELL_PAYLOAD = 'DOCKER_PODMAN_STUDIO_SCRIPT_ARGS';
 const POWERSHELL_COMMAND = [
@@ -272,21 +272,25 @@ export class PodmanService {
     statusRaw = '',
     engine = this.getActiveEngine()
   ): ServiceStatus {
+    const state = (stateRaw || '').trim().toLowerCase();
+    if (/^(?:exited|dead)\b/.test(state)) {
+      return 'exited';
+    }
+    if (/^(?:stopped|created|configured|initialized)\b/.test(state)) {
+      return 'stopped';
+    }
     const s = `${stateRaw || ''} ${statusRaw || ''}`.toLowerCase();
-    if (engine === 'podman' && s.includes('paused')) {
+    if (s.includes('paused')) {
       return 'paused';
     }
-    if (engine === 'podman' && s.includes('restarting')) {
+    if (s.includes('restarting')) {
       return 'restarting';
     }
-    if (s.includes('unhealthy')) {
+    if (s.includes('unhealthy') || s.includes('degraded')) {
       return 'unhealthy';
     }
     if (s.includes('health: starting') || s.includes('starting')) {
       return 'starting';
-    }
-    if (s.includes('restarting')) {
-      return 'restarting';
     }
     if (s.includes('stopping') || s.includes('removing') || s.includes('removal')) {
       return 'stopping';
@@ -297,9 +301,6 @@ export class PodmanService {
       statusRaw.toLowerCase().startsWith('up')
     ) {
       return 'running';
-    }
-    if (s.includes('degraded')) {
-      return 'unhealthy';
     }
     if (s.includes('exited') || s.includes('dead')) {
       return 'exited';
@@ -896,7 +897,7 @@ export class PodmanService {
     if (engine === 'podman') {
       const pluginVersion = async () => {
         const result = await this.runEngineCommand(['compose', 'version'], {
-          timeoutMs: 8000,
+          timeoutMs: QUERY_TIMEOUT_MS,
           engineOverride: 'podman',
         });
         return result.success ? result.stdout.trim().split(/\r?\n/).pop() || '' : '';
@@ -910,7 +911,7 @@ export class PodmanService {
         return '';
       }
       const result = await this.spawnProcess(bin, ['--version'], {
-        timeoutMs: 8000,
+        timeoutMs: QUERY_TIMEOUT_MS,
         engine: 'podman',
       });
       if (result.success && result.stdout.trim()) {
@@ -927,7 +928,7 @@ export class PodmanService {
 
     if (cfg.composePath.trim()) {
       const customRes = await this.spawnProcess(cfg.composePath.trim(), ['--version'], {
-        timeoutMs: 8000,
+        timeoutMs: QUERY_TIMEOUT_MS,
       });
       if (customRes.success) {
         return customRes.stdout.trim().split(/\r?\n/).pop() || '';
@@ -935,14 +936,14 @@ export class PodmanService {
     }
     if (engine === 'docker') {
       const pluginRes = await this.runEngineCommand(['compose', 'version'], {
-        timeoutMs: 8000,
+        timeoutMs: QUERY_TIMEOUT_MS,
         engineOverride: 'docker',
       });
       if (pluginRes.success && pluginRes.stdout.trim()) {
         return pluginRes.stdout.trim().split(/\r?\n/)[0].replace(/^Docker Compose version\s+/i, '');
       }
       const standaloneRes = await this.spawnProcess('docker-compose', ['--version'], {
-        timeoutMs: 8000,
+        timeoutMs: QUERY_TIMEOUT_MS,
       });
       return standaloneRes.success ? standaloneRes.stdout.trim().split(/\r?\n/)[0] : '';
     }
@@ -1114,7 +1115,7 @@ export class PodmanService {
   public async useDockerContext(name: string): Promise<CommandResult> {
     return this.runEngineCommand(['context', 'use', name.trim()], {
       engineOverride: 'docker',
-      timeoutMs: 15_000,
+      timeoutMs: QUERY_TIMEOUT_MS,
     });
   }
 
@@ -1189,6 +1190,7 @@ export class PodmanService {
             id: String(c.Id || c.ID || '').substring(0, 12),
             name: String(c.Names || c.Name || ''),
             status: String(c.Status || ''),
+            state: c.Status ? this.parseStatus(String(c.Status), '', 'podman') : undefined,
             restartCount: Number(c.RestartCount ?? 0),
           }))
         : [];
@@ -1402,10 +1404,12 @@ export class PodmanService {
       const { mappings, display } = this.parsePodmanPorts(n.Ports);
       const statusStr = String(n.Status || n.State || '');
       const stateStr = String(n.State || '');
-      const state = this.parseStatus(stateStr, statusStr, engine);
       const healthMatch = statusStr.match(/\((healthy|unhealthy|health:\s*starting)\)/i);
       const health = typeof n.Health === 'string' && n.Health
         ? n.Health : healthMatch?.[1];
+      const baseState = this.parseStatus(stateStr, statusStr, engine);
+      const state = baseState === 'running' && health
+        ? this.parseStatus(stateStr, `${statusStr} ${health}`, engine) : baseState;
       const exitMatch = statusStr.match(/\bexited\s*\((-?\d+)\)/i);
       const rawExitCode = n.ExitCode ?? n.ExitCodeValue ?? exitMatch?.[1];
       const exitCode = state === 'exited' && rawExitCode !== undefined &&
@@ -2224,7 +2228,7 @@ export class PodmanService {
       args.push(registryHost);
     }
     args.push('--username', username, '--password-stdin');
-    return this.runEngineCommand(args, { stdin: secret, timeoutMs: 30_000, engineOverride });
+    return this.runEngineCommand(args, { stdin: secret, timeoutMs: QUERY_TIMEOUT_MS, engineOverride });
   }
 
   public async logoutRegistry(
@@ -2235,7 +2239,7 @@ export class PodmanService {
     if (registryHost) {
       args.push(registryHost);
     }
-    return this.runEngineCommand(args, { timeoutMs: 15_000, engineOverride });
+    return this.runEngineCommand(args, { timeoutMs: QUERY_TIMEOUT_MS, engineOverride });
   }
 
   // ==================== COMPOSE OPERATIONS ====================

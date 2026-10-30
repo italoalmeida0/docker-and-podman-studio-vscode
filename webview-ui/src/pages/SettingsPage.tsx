@@ -8,7 +8,6 @@ import {
   RotateCcw,
   Save,
   Settings,
-  ShieldAlert,
 } from 'lucide-react';
 import { ActionPillButton, Modal } from '../components/Shared';
 import { DockerMark, PodmanMark } from '../components/BrandIcons';
@@ -155,9 +154,9 @@ export const SettingsPage: React.FC = () => {
   const accentIconClass = engine === 'podman' ? 'text-accent-purple' : 'text-accent-blue';
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full min-h-0">
       {/* Header */}
-      <div className="px-6 py-4 border-b border-panel-border bg-panel-card flex items-center justify-between gap-4 flex-wrap">
+      <div className="studio-page-header px-3 sm:px-6 py-4 border-b border-panel-border bg-panel-card flex items-center justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-[17px] font-semibold tracking-tight text-text-primary">
             {t.settings.title}
@@ -187,7 +186,7 @@ export const SettingsPage: React.FC = () => {
       {/* Body */}
       <fieldset
         disabled={saveSettings.pending || resetPaths.pending || Boolean(operationsInProgress['settings-save'] || operationsInProgress['settings-reset'])}
-        className="flex-1 min-h-0 min-w-0 overflow-auto p-6 space-y-5 max-w-5xl"
+        className="flex-1 min-h-0 min-w-0 overflow-auto p-3 sm:p-6 space-y-5 max-w-5xl"
       >
         {/* Section 0: Container Engine Selector (Docker Default vs Podman) */}
         <div className="bg-panel-card border border-panel-border rounded-xl p-5 shadow-card space-y-4">
@@ -424,7 +423,7 @@ export const SettingsPage: React.FC = () => {
               aria-describedby="long-operation-timeout-hint"
               className="input-field font-mono"
             />
-            <p id="long-operation-timeout-hint" className={`mt-1 text-xs ${timeoutValid ? 'text-text-secondary' : 'text-accent-red'}`}>
+            <p id="long-operation-timeout-hint" className={`mt-1 text-xs ${timeoutValid ? 'text-text-secondary' : 'text-accent-orange'}`}>
               {timeoutValid ? feedback.timeoutHint : feedback.invalidTimeout}
             </p>
           </div>
@@ -631,19 +630,12 @@ export const SettingsPage: React.FC = () => {
             </div>
           </div>
 
-          {settingsTestResult && (
+          {settingsTestResult?.ok && (
             <div
-              className={`rounded-md p-3 text-xs border flex items-center gap-2 ${
-                settingsTestResult.ok
-                  ? 'border-accent-green bg-green-500/10 text-accent-green'
-                  : 'border-accent-red bg-red-500/10 text-accent-red'
-              }`}
+              role="status"
+              className="rounded-md p-3 text-xs border flex items-center gap-2 border-accent-green bg-green-500/10 text-accent-green"
             >
-              {settingsTestResult.ok ? (
-                <CheckCircle2 className="w-4 h-4 shrink-0" />
-              ) : (
-                <ShieldAlert className="w-4 h-4 shrink-0" />
-              )}
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
               <span>{settingsTestResult.message}</span>
             </div>
           )}

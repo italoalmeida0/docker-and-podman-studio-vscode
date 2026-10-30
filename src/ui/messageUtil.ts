@@ -1,6 +1,24 @@
 import * as vscode from 'vscode';
-import { bt } from '../i18n';
+import { bt, resolveBackendLocale } from '../i18n';
+import { failureSeverity, FailurePresentation, formatFailureSummary } from '../shared/failureMessages';
 import { classifyFailure } from '../shared/operationFeedback';
+import type { SupportedLocale } from '../config';
+
+export function createFailurePresentation(
+  message: string,
+  errorCode?: string,
+  operation?: string,
+  progress?: { completed?: number; total?: number },
+  operationLocale: SupportedLocale = resolveBackendLocale()
+): FailurePresentation {
+  return {
+    kind: classifyFailure(message, errorCode),
+    ...(operation && (operationLocale === 'en' || operationLocale === 'pt-BR')
+      ? { operation, operationLocale } : {}),
+    ...(typeof progress?.completed === 'number' ? { completed: progress.completed } : {}),
+    ...(typeof progress?.total === 'number' ? { total: progress.total } : {}),
+  };
+}
 
 export function summarizeFailure(
   message: string,
@@ -8,28 +26,7 @@ export function summarizeFailure(
   operation?: string,
   progress?: { completed?: number; total?: number }
 ): string {
-  const { completed, total } = progress || {};
-  if (operation && typeof completed === 'number' && Number.isInteger(completed) &&
-      typeof total === 'number' && Number.isInteger(total) &&
-      total > 0 && completed >= 0 && completed <= total) {
-    return `${bt('opFailed', { op: operation })}. ${bt('batchPartialSummary', { completed, total })}` +
-      (errorCode === 'ETIMEDOUT' ? ` ${bt('failureTimeout')}` : '');
-  }
-  const kind = classifyFailure(message, errorCode);
-  if (kind === 'generic' && !operation && !message.includes('\n') && message.length <= 220) {
-    return message;
-  }
-  const reason = kind === 'timeout' ? bt('failureTimeout')
-    : kind === 'missingExecutable' ? bt('failureMissingExecutable')
-      : kind === 'diskSpace' ? bt('failureDiskSpace')
-        : kind === 'portInUse' ? bt('failurePortInUse')
-          : kind === 'registryAuth' ? bt('failureRegistryAuth')
-            : kind === 'permission' ? bt('failurePermission')
-              : kind === 'imageNotFound' ? bt('failureImageNotFound')
-                : kind === 'engineConnection' ? bt('failureEngineConnection')
-                  : kind === 'network' ? bt('failureNetwork')
-                    : bt('failureGeneric');
-  return operation ? `${bt('opFailed', { op: operation })}. ${reason}` : reason;
+  return formatFailureSummary(resolveBackendLocale(), createFailurePresentation(message, errorCode, operation, progress));
 }
 
 export function stripFormatFlags(command: string): string {
@@ -58,9 +55,12 @@ export function showErrorWithCopy(
     actions.push(copyCommandLabel);
   }
   output.appendLine(`[${new Date().toISOString()}] ${operation}:\n${errorMessage}`);
-  void Promise.resolve(vscode.window.showErrorMessage(
-    summarizeFailure(errorMessage, errorCode, operation, progress), ...actions
-  )).then(async (choice) => {
+  const failure = createFailurePresentation(errorMessage, errorCode, operation, progress);
+  const summary = formatFailureSummary(resolveBackendLocale(), failure);
+  const notification = failureSeverity(failure) === 'warning'
+    ? vscode.window.showWarningMessage(summary, ...actions)
+    : vscode.window.showErrorMessage(summary, ...actions);
+  void Promise.resolve(notification).then(async (choice) => {
     if (choice === openOutputLabel) {
       output.show(true);
     } else if (choice === copyErrorLabel) {

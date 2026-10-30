@@ -41,7 +41,9 @@ export class ComposeFileDetector implements vscode.Disposable {
   private files: string[] = [];
   private watcher: vscode.FileSystemWatcher | undefined;
   private readonly _onFilesChanged = new vscode.EventEmitter<string[]>();
+  private readonly _onFileRegistered = new vscode.EventEmitter<string>();
   public readonly onFilesChanged = this._onFilesChanged.event;
+  public readonly onFileRegistered = this._onFileRegistered.event;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -108,6 +110,7 @@ export class ComposeFileDetector implements vscode.Disposable {
     await this.savePersistedFiles([...persisted, normalized]);
     await this.scan();
     this._onFilesChanged.fire(this.files);
+    this._onFileRegistered.fire(normalized);
     return this.files;
   }
 
@@ -119,5 +122,6 @@ export class ComposeFileDetector implements vscode.Disposable {
   public dispose(): void {
     this.watcher?.dispose();
     this._onFilesChanged.dispose();
+    this._onFileRegistered.dispose();
   }
 }

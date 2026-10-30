@@ -15,8 +15,10 @@ export class StatusProvider implements vscode.Disposable {
   private lastError = '';
   private readonly _onStatusChange = new vscode.EventEmitter<ComposeContainerStatus[]>();
   private readonly _onError = new vscode.EventEmitter<string>();
+  private readonly _onRecovery = new vscode.EventEmitter<void>();
   public readonly onStatusChange = this._onStatusChange.event;
   public readonly onError = this._onError.event;
+  public readonly onRecovery = this._onRecovery.event;
 
   constructor(
     private readonly podman: PodmanService,
@@ -41,9 +43,8 @@ export class StatusProvider implements vscode.Disposable {
     this.activeFile = composeFile;
     this.contextKey = nextContext;
     if (changedFile || changedContext) {
+      if (this.lastError) this._onRecovery.fire();
       this.lastError = '';
-    }
-    if (changedFile || changedContext) {
       this.clearContainers();
     }
     void this.poll();
@@ -64,6 +65,7 @@ export class StatusProvider implements vscode.Disposable {
   public clearActiveFile(): void {
     this.stopPolling();
     this.contextKey = undefined;
+    if (this.lastError) this._onRecovery.fire();
     this.lastError = '';
     this.clearContainers();
   }
@@ -99,7 +101,10 @@ export class StatusProvider implements vscode.Disposable {
         this.clearContainers();
         return this.containers;
       }
-      this.lastError = '';
+      if (this.lastError) {
+        this.lastError = '';
+        this._onRecovery.fire();
+      }
       const changed = JSON.stringify(next) !== JSON.stringify(this.containers);
       this.containers = next;
       if (changed) {
@@ -139,5 +144,6 @@ export class StatusProvider implements vscode.Disposable {
     this.stopPolling();
     this._onStatusChange.dispose();
     this._onError.dispose();
+    this._onRecovery.dispose();
   }
 }

@@ -66,8 +66,9 @@ export function usePodmanSelection(
 export const PodmanBatchActions: React.FC<{
   selection: ReturnType<typeof usePodmanSelection>;
   busy: boolean;
+  resourceLabel: string;
   onAction: (action: BatchAction, ids: string[]) => void;
-}> = ({ selection, busy, onAction }) => {
+}> = ({ selection, busy, resourceLabel, onAction }) => {
   const { t, fmt } = useI18n();
   const start = selection.selected.filter(
     (item) => item.state === 'stopped' || item.state === 'exited'
@@ -90,6 +91,7 @@ export const PodmanBatchActions: React.FC<{
 
   return (
     <div className="flex items-center gap-3 flex-wrap bg-panel-card border border-panel-border rounded-md px-3 py-2">
+      <span className="text-xs font-semibold text-text-primary">{resourceLabel}</span>
       <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer">
         <input
           ref={checkbox}

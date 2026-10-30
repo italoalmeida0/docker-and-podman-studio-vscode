@@ -2,9 +2,12 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const YAML = require('yaml');
 const { loadModule } = require('./podman-harness.cjs');
+const path = require('node:path');
 
 const { buildComposeDocument, serializeComposeBuilder, validateComposeBuilder } =
   loadModule('src/shared/composeBuilder.ts');
+const { formatComposeBuilderMessage } =
+  loadModule(path.join('src', 'shared', 'composeBuilderMessages.ts'));
 
 function service(name, overrides = {}) {
   return {
@@ -68,6 +71,34 @@ test('wizard rejects duplicates, invalid dependencies, cycles and bad healthchec
 test('wizard rejects duplicate environment keys instead of silently overwriting values', () => {
   const errors = validateComposeBuilder({ services: [service('app', { environmentText: 'KEY=one\nKEY=two' })] });
   assert.match(errors.join('\n'), /duplicate environment key/i);
+});
+
+test('Compose builder validation follows all supported languages and preserves field names', () => {
+  const locales = ['en', 'pt-BR', 'es', 'fr', 'de', 'it', 'ru', 'uk', 'pl', 'tr', 'nl',
+    'ja', 'ko', 'zh-CN', 'zh-TW', 'hi'];
+  const keys = [
+    'invalidList', 'invalidFields', 'invalidServiceName', 'duplicateService',
+    'invalidContainerName', 'duplicateContainer', 'missingImage', 'invalidNetworkName',
+    'invalidVolumeName', 'invalidEnvironmentKey', 'invalidHealthcheck', 'invalidDependency',
+    'dependencyCycle',
+  ];
+  const variables = { name: 'my-service', key: 'MY_KEY', dependency: 'db-service' };
+  for (const locale of locales) {
+    for (const key of keys) {
+      const english = formatComposeBuilderMessage('en', key, variables);
+      const message = formatComposeBuilderMessage(locale, key, variables);
+      assert.ok(message, `${locale}:${key}`);
+      assert.doesNotMatch(message, /\{\w+\}/, `${locale}:${key}`);
+      for (const value of Object.values(variables)) {
+        if (english.includes(value)) assert.ok(message.includes(value), `${locale}:${key}:${value}`);
+      }
+      if (locale !== 'en') assert.notEqual(message, english, `${locale}:${key}`);
+    }
+  }
+  const spec = { services: [service('app', { image: '', environmentText: 'BAD KEY=value' })] };
+  assert.match(validateComposeBuilder(spec, {}, 'pt-BR').join('\n'), /precisa de uma imagem/);
+  assert.match(validateComposeBuilder(spec, {}, 'es').join('\n'), /necesita una imagen/);
+  assert.match(validateComposeBuilder(spec).join('\n'), /requires an image/);
 });
 
 test('adding a service accepts existing dependencies, preserves inherited environment and catches cycles', () => {

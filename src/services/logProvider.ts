@@ -1,13 +1,24 @@
 import { ChildProcess } from 'child_process';
 import { StringDecoder } from 'string_decoder';
 import * as vscode from 'vscode';
-import { getConfig } from '../config';
+import { ContainerEngine, getConfig } from '../config';
 import { bt } from '../i18n';
 import { LogEntry } from '../types';
 import { PodmanService } from './podmanService';
 
 interface LogStream {
   processes: Set<ChildProcess>;
+  engine: ContainerEngine;
+}
+
+export interface LogStreamTarget {
+  key: string;
+  source: string;
+  engine: ContainerEngine;
+}
+
+export interface LogStreamError extends LogStreamTarget {
+  message: string;
 }
 
 function logIdentity(entry: LogEntry): string {
@@ -18,9 +29,11 @@ export class LogProvider implements vscode.Disposable {
   private readonly streams = new Map<string, LogStream>();
   private readonly history = new Map<string, LogEntry[]>();
   private readonly _onLogLine = new vscode.EventEmitter<LogEntry>();
-  private readonly _onError = new vscode.EventEmitter<string>();
+  private readonly _onError = new vscode.EventEmitter<LogStreamError>();
+  private readonly _onRecovery = new vscode.EventEmitter<LogStreamTarget>();
   public readonly onLogLine = this._onLogLine.event;
   public readonly onError = this._onError.event;
+  public readonly onRecovery = this._onRecovery.event;
 
   constructor(private readonly podman: PodmanService) {}
 
@@ -31,7 +44,7 @@ export class LogProvider implements vscode.Disposable {
   ): Promise<void> {
     const key = options?.key || service;
     this.stopStreaming(key);
-    const stream: LogStream = { processes: new Set() };
+    const stream: LogStream = { processes: new Set(), engine: getConfig().engine };
     this.streams.set(key, stream);
     try {
       const replayable = options?.tail === undefined
@@ -70,7 +83,7 @@ export class LogProvider implements vscode.Disposable {
 
   public startContainerStreaming(containerId: string): void {
     this.stopStreaming(containerId);
-    const stream: LogStream = { processes: new Set() };
+    const stream: LogStream = { processes: new Set(), engine: getConfig().engine };
     this.streams.set(containerId, stream);
     try {
       const proc = this.podman.streamContainerLogs(containerId, 200);
@@ -94,12 +107,21 @@ export class LogProvider implements vscode.Disposable {
     const isCurrent = () => this.streams.get(key) === stream && stream.processes.has(proc);
     const stdout = { decoder: new StringDecoder('utf8'), pending: '' };
     const stderr = { decoder: new StringDecoder('utf8'), pending: '' };
+    const streamTarget = { key, source: containerName || displayService, engine: stream.engine };
+    let recovered = false;
+    const reportRecovery = () => {
+      if (!recovered) {
+        recovered = true;
+        this._onRecovery.fire(streamTarget);
+      }
+    };
     let stderrTail = '';
-    const emitLine = (line: string) => {
+    const emitLine = (line: string, isStderr: boolean) => {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith('>>>> Executing external compose provider')) {
         return;
       }
+      if (!isStderr) reportRecovery();
       const entry = this.parseLine(displayService, line);
       if (target) entry.target = target;
       if (containerName) entry.message = `[${containerName}] ${entry.message}`;
@@ -129,12 +151,12 @@ export class LogProvider implements vscode.Disposable {
       }
       const lines = (state.pending + text).split(/\r?\n/);
       state.pending = lines.pop() || '';
-      lines.forEach(emitLine);
+      lines.forEach((line) => emitLine(line, isStderr));
     };
-    const flush = (state: typeof stdout) => {
+    const flush = (state: typeof stdout, isStderr: boolean) => {
       const remaining = state.pending + state.decoder.end();
       if (remaining) {
-        emitLine(remaining.replace(/\r$/, ''));
+        emitLine(remaining.replace(/\r$/, ''), isStderr);
       }
     };
 
@@ -144,20 +166,28 @@ export class LogProvider implements vscode.Disposable {
       if (!isCurrent()) {
         return;
       }
-      flush(stdout);
-      flush(stderr);
+      flush(stdout, false);
+      flush(stderr, true);
       stream.processes.delete(proc);
       if (stream.processes.size === 0) this.streams.delete(key);
       if (code !== 0) {
         const detail = stderrTail.trim() || (signal ? `signal ${signal}` : `exit code ${code}`);
-        this._onError.fire(bt('logStreamError', { name: displayService, error: detail }));
+        this._onError.fire({
+          ...streamTarget,
+          message: bt('logStreamError', { name: displayService, error: detail }),
+        });
+      } else {
+        reportRecovery();
       }
     });
     proc.on('error', (error) => {
       if (isCurrent()) {
         stream.processes.delete(proc);
         if (stream.processes.size === 0) this.streams.delete(key);
-        this._onError.fire(bt('logStreamError', { name: displayService, error: error.message }));
+        this._onError.fire({
+          ...streamTarget,
+          message: bt('logStreamError', { name: displayService, error: error.message }),
+        });
       }
     });
   }
@@ -235,5 +265,6 @@ export class LogProvider implements vscode.Disposable {
     }
     this._onLogLine.dispose();
     this._onError.dispose();
+    this._onRecovery.dispose();
   }
 }

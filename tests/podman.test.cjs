@@ -33,6 +33,29 @@ test('distinguishes restarting from starting', () => {
   assert.equal(service.parseStatus('running', 'Up (unhealthy)'), 'unhealthy');
   config.engine = 'docker';
   assert.equal(service.parseStatus('paused', '', 'podman'), 'paused');
+  assert.equal(service.parseStatus('running', 'Degraded', 'podman'), 'unhealthy');
+  assert.equal(service.parseStatus('paused', '', 'docker'), 'paused');
+});
+
+test('container health is combined with running state but never revives stopped containers', async () => {
+  const service = new PodmanService();
+  service.runEngineCommand = async () => ({
+    success: true, stderr: '', exitCode: 0,
+    stdout: JSON.stringify([
+      { Id: 'a'.repeat(64), Names: ['healthy'], State: 'running', Status: 'Up', Health: 'healthy' },
+      { Id: 'b'.repeat(64), Names: ['unhealthy'], State: 'running', Status: 'Up', Health: 'unhealthy' },
+      { Id: 'c'.repeat(64), Names: ['starting'], State: 'running', Status: 'Up', Health: 'starting' },
+      { Id: 'd'.repeat(64), Names: ['exited'], State: 'exited', Status: 'Exited (1)', Health: 'unhealthy' },
+      { Id: 'e'.repeat(64), Names: ['paused'], State: 'paused', Status: 'Paused', Health: 'unhealthy' },
+      { Id: 'f'.repeat(64), Names: ['exited-health'], State: 'exited', Status: 'Exited (3) (unhealthy)' },
+      { Id: '0'.repeat(64), Names: ['created-health'], State: 'created', Status: 'Created (health: starting)' },
+    ]),
+  });
+  const containers = await service.listAllContainers();
+  assert.deepEqual(containers.map(({ name, state }) => [name, state]), [
+    ['healthy', 'running'], ['unhealthy', 'unhealthy'], ['starting', 'starting'],
+    ['exited', 'exited'], ['paused', 'paused'], ['exited-health', 'exited'], ['created-health', 'stopped'],
+  ]);
 });
 
 test('does not present an exposed-only port as a published host port', () => {

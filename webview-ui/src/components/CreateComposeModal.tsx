@@ -70,11 +70,11 @@ function initialService(id: number, dockerfile: string, network = 'app-net'): Wi
 export const CreateComposeModal: React.FC<{
   onClose: () => void;
 }> = ({ onClose }) => {
-  const { t, fmt, engine, engineLabel } = useI18n();
+  const { t, fmt, engine, engineLabel, locale } = useI18n();
   const extra = useComposeExtras();
   const { postMessage, onMessage } = useVsCodeMessaging();
   const {
-    selectedDirectory, imageResults, setImageResults, imageSearchError,
+    selectedDirectory, imageResults, setImageResults,
     setImageSearchError, operationsInProgress,
   } = useStudioStore();
   const searching = Boolean(operationsInProgress['image-search']);
@@ -191,12 +191,12 @@ export const CreateComposeModal: React.FC<{
     })) : [],
   }), [includeSampleService, services]);
   const validation = useMemo(() => [
-    ...validateComposeBuilder(spec),
+    ...validateComposeBuilder(spec, {}, locale),
     ...(includeSampleService && services.some((service) =>
       (service.includeNetwork && !service.networkName.trim()) ||
       (service.includeVolume && !service.volumeName.trim())
     ) ? [extra.wizardResourceName] : []),
-  ], [extra.wizardResourceName, includeSampleService, services, spec]);
+  ], [extra.wizardResourceName, includeSampleService, services, spec, locale]);
   const previewYaml = useMemo(
     () => validation.length === 0 ? serializeComposeBuilder(spec) : '',
     [spec, validation]
@@ -237,7 +237,7 @@ export const CreateComposeModal: React.FC<{
           </>
         }
       >
-        <div className="grid grid-cols-[1fr_340px] gap-5">
+        <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_340px] gap-5">
           {/* Left Form */}
           <div className="space-y-4">
             <div className="grid grid-cols-2 gap-3">
@@ -429,7 +429,7 @@ export const CreateComposeModal: React.FC<{
 
                 {serviceSource === 'image' ? (
                   <div className="space-y-2 bg-panel-bg border border-panel-border rounded-md p-3">
-                    <div className="grid grid-cols-[150px_1fr_auto] gap-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,150px)_minmax(0,1fr)_auto] gap-2">
                       <select
                         value={registryType}
                         onChange={(e) => setRegistryType(e.target.value as any)}
@@ -467,18 +467,6 @@ export const CreateComposeModal: React.FC<{
                         placeholder="registry.company.local:5000"
                         className="input-field font-mono text-xs"
                       />
-                    )}
-                    {imageSearchError && (
-                      <p role="alert" className="text-xs text-accent-red">
-                        {imageSearchError}{' '}
-                        <button
-                          type="button"
-                          className="underline underline-offset-2"
-                          onClick={() => postMessage('output:show')}
-                        >
-                          {t.common.showOutput}
-                        </button>
-                      </p>
                     )}
                     {imageResults.length > 0 && (
                       <div className="max-h-36 overflow-auto space-y-1 pt-1">

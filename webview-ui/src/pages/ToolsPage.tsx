@@ -49,8 +49,8 @@ export const ToolsPage: React.FC = () => {
   ];
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="px-6 py-4 border-b border-panel-border bg-panel-card flex items-center justify-between">
+    <div className="flex flex-col h-full min-h-0">
+      <div className="studio-page-header px-3 sm:px-6 py-4 border-b border-panel-border bg-panel-card flex items-center justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-lg font-semibold text-text-primary flex items-center gap-2">
             <Wrench className={`w-5 h-5 ${accentText}`} />
@@ -60,7 +60,7 @@ export const ToolsPage: React.FC = () => {
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto p-6 space-y-6">
+      <div className="flex-1 min-h-0 overflow-auto p-3 sm:p-6 space-y-6">
         <div className="grid grid-cols-2 gap-4">
           {/* Maintenance Suite */}
           <div className="bg-panel-card border border-panel-border rounded-md p-5 shadow-card space-y-4">

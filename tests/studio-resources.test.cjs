@@ -494,6 +494,35 @@ test('container tree groups pods and Compose projects, preserves empty pods and 
   assert.equal(containerFilterForEngine('compose', 'docker'), 'compose');
 });
 
+test('group status includes members hidden by search, filters, and infrastructure settings', () => {
+  const { buildContainerTree, mostAttentionStatus } =
+    loadModule(path.join('webview-ui', 'src', 'containerTree.ts'));
+  const pod = {
+    id: 'pod-short', fullId: 'pod-full', name: 'group', networks: [], state: 'running',
+    containers: [{ id: 'not-listed', state: 'exited' }],
+  };
+  const container = (name, overrides = {}) => ({
+    id: name, fullId: name, name, image: 'image', state: 'running',
+    podId: '', podName: '', isCompose: false, composeProject: '', ...overrides,
+  });
+  const podVisible = container('pod-visible', { podId: pod.id, podName: pod.name });
+  const podHidden = container('pod-infra', { podId: pod.id, podName: pod.name, state: 'unhealthy', isInfra: true });
+  const composeVisible = container('compose-visible', { isCompose: true, composeProject: 'project' });
+  const composeHidden = container('compose-hidden', {
+    isCompose: true, composeProject: 'project', state: 'starting',
+  });
+  const visible = [podVisible, composeVisible, composeHidden];
+  const all = [...visible, podHidden];
+  const tree = buildContainerTree(visible, [pod], 'podman', 'running', 'visible', all);
+  assert.deepEqual(tree.podGroups.map((group) => [group.containers.length, group.status]), [[1, 'unhealthy']]);
+  assert.deepEqual(tree.composeGroups.map((group) => [group.containers.length, group.status]), [[1, 'starting']]);
+  const withoutInfra = buildContainerTree(visible, [pod], 'podman', 'all', 'pod-visible', visible);
+  assert.equal(withoutInfra.podGroups[0].status, 'exited', 'unlisted pod members still influence the group');
+  assert.equal(mostAttentionStatus(['running', 'stopped', 'starting', 'restarting']), 'restarting');
+  assert.equal(mostAttentionStatus(['running', 'paused', 'exited']), 'exited');
+  assert.equal(mostAttentionStatus([], 'stopped'), 'stopped');
+});
+
 test('progress tokens, engine changes and error banners remain consistent', () => {
   if (typeof globalThis.navigator === 'undefined') globalThis.navigator = { language: 'en' };
   const { useStudioStore } = loadModule(path.join('webview-ui', 'src', 'store.ts'));
@@ -536,6 +565,17 @@ test('engine messages wait for settings and ignore stale responses from another 
   assert.equal(gate.shouldHandle(other, 'podman', true), false);
   assert.equal(gate.shouldHandle(latest, 'podman', true), true);
   assert.equal(gate.shouldHandle({ command: 'error' }, 'podman', false), true);
+
+  const feedback = createEngineMessageGate();
+  const event = (command, scope, message) => ({ command, engine: 'podman', payload: { scope, message } });
+  feedback.shouldHandle(event('error', 'one', 'old'), 'docker', false);
+  feedback.shouldHandle(event('error', 'two', 'independent'), 'docker', false);
+  feedback.shouldHandle(event('error:resolved', 'one'), 'docker', false);
+  feedback.shouldHandle(event('error', 'one', 'new'), 'docker', false);
+  assert.deepEqual(feedback.drain('podman').map((item) => item.payload.message), ['independent', 'new']);
+  feedback.shouldHandle(event('error', 'one', 'failed'), 'docker', false);
+  feedback.shouldHandle(event('error:resolved', 'one'), 'docker', false);
+  assert.equal(feedback.drain('podman')[0].command, 'error:resolved');
 });
 
 test('closing the Studio panel notifies listeners before it is reopened', (t) => {
@@ -591,7 +631,7 @@ test('registry requests handle timeouts, interrupted responses and cancellation'
   t.after(() => { https.get = originalGet; });
 
   https.get = (_url, options) => {
-    assert.equal(options.timeout, 20_000);
+    assert.equal(options.timeout, 30_000);
     const request = new EventEmitter();
     request.destroy = (error) => { request.emit('error', error); };
     queueMicrotask(() => request.emit('timeout'));

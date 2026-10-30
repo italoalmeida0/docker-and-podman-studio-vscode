@@ -82,7 +82,8 @@ export const SelectionBar: React.FC<{
   selection: SelectionBarState;
   busy: boolean;
   children?: React.ReactNode;
-}> = ({ selection, busy, children }) => {
+  inline?: boolean;
+}> = ({ selection, busy, children, inline = false }) => {
   const { t, fmt } = useI18n();
   const checkbox = useRef<HTMLInputElement>(null);
   const mixed = selection.visibleSelected > 0 && selection.visibleSelected < selection.visibleCount;
@@ -93,7 +94,9 @@ export const SelectionBar: React.FC<{
   if (selection.visibleCount === 0 && selection.selected.length === 0) return null;
 
   return (
-    <div className="flex items-center gap-3 flex-wrap bg-panel-card border border-panel-border rounded-md px-3 py-2">
+    <div className={`flex items-center gap-3 flex-wrap ${
+      inline ? '' : 'bg-panel-card border border-panel-border rounded-md px-3 py-2'
+    }`}>
       <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer">
         <input
           ref={checkbox}

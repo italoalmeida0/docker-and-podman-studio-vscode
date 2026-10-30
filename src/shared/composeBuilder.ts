@@ -1,5 +1,7 @@
 import { stringify } from 'yaml';
+import type { SupportedLocale } from '../config';
 import type { ComposeDocument } from '../types';
+import { formatComposeBuilderMessage } from './composeBuilderMessages';
 
 export interface ComposeBuilderService {
   name: string;
@@ -59,9 +61,10 @@ function volumeSource(spec: string): string | undefined {
 
 export function validateComposeBuilder(
   spec: ComposeBuilderSpec,
-  existingServices: Record<string, unknown> = {}
+  existingServices: Record<string, unknown> = {},
+  locale: SupportedLocale = 'en'
 ): string[] {
-  if (!spec || !Array.isArray(spec.services)) return ['The service list is invalid.'];
+  if (!spec || !Array.isArray(spec.services)) return [formatComposeBuilderMessage(locale, 'invalidList')];
   const errors: string[] = [];
   const names = new Set(Object.keys(existingServices));
   const containerNames = new Set<string>();
@@ -81,35 +84,35 @@ export function validateComposeBuilder(
         typeof service.dependsText !== 'string' || typeof service.commandText !== 'string' ||
         !Array.isArray(service.ports) || service.ports.some((port) => typeof port !== 'string') ||
         (service.source !== 'image' && service.source !== 'build')) {
-      errors.push('A service contains invalid fields.');
+      errors.push(formatComposeBuilderMessage(locale, 'invalidFields'));
       continue;
     }
     const name = service.name.trim();
-    if (!NAME.test(name)) errors.push(`Invalid service name: "${name}".`);
-    if (names.has(name)) errors.push(`Service "${name}" is duplicated.`);
+    if (!NAME.test(name)) errors.push(formatComposeBuilderMessage(locale, 'invalidServiceName', { name }));
+    if (names.has(name)) errors.push(formatComposeBuilderMessage(locale, 'duplicateService', { name }));
     names.add(name);
     const containerName = service.containerName.trim();
     if (containerName && !NAME.test(containerName)) {
-      errors.push(`Invalid container name: "${containerName}".`);
+      errors.push(formatComposeBuilderMessage(locale, 'invalidContainerName', { name: containerName }));
     }
     if (containerName && containerNames.has(containerName)) {
-      errors.push(`Container name "${containerName}" is duplicated.`);
+      errors.push(formatComposeBuilderMessage(locale, 'duplicateContainer', { name: containerName }));
     }
     if (containerName) containerNames.add(containerName);
     if (service.source === 'image' && !service.image.trim()) {
-      errors.push(`Service "${name}" requires an image.`);
+      errors.push(formatComposeBuilderMessage(locale, 'missingImage', { name }));
     }
     if (service.networkName && !NAME.test(service.networkName.trim())) {
-      errors.push(`Invalid network name for "${name}".`);
+      errors.push(formatComposeBuilderMessage(locale, 'invalidNetworkName', { name }));
     }
     if (service.volumeName && !NAME.test(service.volumeName.trim())) {
-      errors.push(`Invalid volume name for "${name}".`);
+      errors.push(formatComposeBuilderMessage(locale, 'invalidVolumeName', { name }));
     }
     const keys = new Set<string>();
     for (const line of environmentLines(service.environmentText)) {
       const key = line.split('=', 1)[0].trim();
       if (!key || /[\s=]/.test(key) || keys.has(key)) {
-        errors.push(`Invalid or duplicate environment key "${key}" in "${name}".`);
+        errors.push(formatComposeBuilderMessage(locale, 'invalidEnvironmentKey', { key, name }));
       }
       keys.add(key);
     }
@@ -121,7 +124,7 @@ export function validateComposeBuilder(
           (healthcheck.retries.trim() &&
             (!/^\d+$/.test(healthcheck.retries.trim()) ||
               !Number.isSafeInteger(Number(healthcheck.retries.trim()))))) {
-        errors.push(`Invalid healthcheck for "${name}".`);
+        errors.push(formatComposeBuilderMessage(locale, 'invalidHealthcheck', { name }));
       }
     }
   }
@@ -142,7 +145,7 @@ export function validateComposeBuilder(
     for (const dependency of deps) {
       if (!names.has(dependency.name) || dependency.name === name || seen.has(dependency.name) ||
           (dependency.condition !== undefined && !CONDITIONS.has(dependency.condition))) {
-        errors.push(`Invalid dependency "${dependency.name}" in "${name}".`);
+        errors.push(formatComposeBuilderMessage(locale, 'invalidDependency', { dependency: dependency.name, name }));
       }
       seen.add(dependency.name);
     }
@@ -161,7 +164,7 @@ export function validateComposeBuilder(
     visited.add(name);
     return false;
   };
-  if ([...graph.keys()].some(hasCycle)) errors.push('Service dependencies contain a cycle.');
+  if ([...graph.keys()].some(hasCycle)) errors.push(formatComposeBuilderMessage(locale, 'dependencyCycle'));
   return errors;
 }
 

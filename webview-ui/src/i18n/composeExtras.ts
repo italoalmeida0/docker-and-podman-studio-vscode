@@ -1,4 +1,6 @@
 import { useStudioStore } from '../store';
+import type { SupportedLocale } from '../store';
+import { composeAlertTexts } from './composeAlerts';
 
 const en = {
   draftConflict: 'This file changed outside the draft. Your edits are preserved; compare them before reloading or saving.',
@@ -172,7 +174,17 @@ const ptBR: typeof en = {
   savingYaml: 'Salvando YAML...',
 };
 
+const localized = new Map<SupportedLocale, typeof en>();
+
+export function composeExtrasForLocale(locale: SupportedLocale): typeof en {
+  const cached = localized.get(locale);
+  if (cached) return cached;
+  const result = { ...(locale === 'pt-BR' ? ptBR : en), ...composeAlertTexts(locale) };
+  localized.set(locale, result);
+  return result;
+}
+
 export function useComposeExtras(): typeof en {
   const locale = useStudioStore((state) => state.resolvedLocale);
-  return locale === 'pt-BR' ? ptBR : en;
+  return composeExtrasForLocale(locale);
 }

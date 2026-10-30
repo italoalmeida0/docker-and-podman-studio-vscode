@@ -4,6 +4,8 @@ import {
   appendOutputTail,
   OperationSnapshot,
 } from '../../src/shared/operationFeedback';
+import { FailurePresentation } from '../../src/shared/failureMessages';
+import type { OperationLabel } from './operationLabels';
 import { ComposeDraft, ComposeServiceDraft, syncComposeDraft } from './composeDrafts';
 import { createEngineMessageGate, StudioMessage, useVsCodeMessaging } from './vscode';
 
@@ -116,6 +118,7 @@ export interface PodContainerSummary {
   id: string;
   name: string;
   status: string;
+  state?: ServiceStatus;
   restartCount: number;
 }
 
@@ -350,13 +353,18 @@ export interface BannerToast {
   id: number;
   type: 'success' | 'error' | 'info';
   message: string;
+  engine?: ContainerEngine;
   details?: string;
+  scope?: string;
+  failure?: FailurePresentation;
+  operation?: OperationLabel;
 }
 
 export interface StudioOperation {
   id: string;
   key: string;
   label: string;
+  labelLocale?: SupportedLocale;
   startedAt: number;
   output: string;
   outputTruncated: boolean;
@@ -406,6 +414,7 @@ interface StudioState {
   selectedDirectory: string | null;
   imageResults: ImageSearchResult[];
   imageSearchError: string | null;
+  imageSearchFailure: FailurePresentation | null;
   operationInProgress: string | null;
   operationsInProgress: Record<string, number>;
   operationLabels: Record<string, string>;
@@ -430,7 +439,7 @@ interface StudioState {
 
   // Settings
   settings: StudioSettings | null;
-  settingsTestResult: { ok: boolean; message: string } | null;
+  settingsTestResult: { ok: boolean; message: string; failure?: FailurePresentation } | null;
 
   // Banner/Notifications
   banners: BannerToast[];
@@ -453,7 +462,7 @@ interface StudioState {
   setComposeContainers: (containers: ComposeContainerStatus[]) => void;
   setSelectedDirectory: (dir: string | null) => void;
   setImageResults: (results: ImageSearchResult[]) => void;
-  setImageSearchError: (message: string | null) => void;
+  setImageSearchError: (message: string | null, failure?: FailurePresentation) => void;
   beginOperation: (op: string, label?: string, id?: string, snapshot?: OperationSnapshot) => void;
   endOperation: (op: string, id?: string) => void;
   setOperationSnapshot: (operations: OperationSnapshot[]) => void;
@@ -475,9 +484,10 @@ interface StudioState {
   clearLogs: () => void;
   setLogFilter: (filter: string) => void;
   setSettings: (settings: StudioSettings) => void;
-  setSettingsTestResult: (res: { ok: boolean; message: string } | null) => void;
-  showBanner: (type: 'success' | 'error' | 'info', message: string, details?: string) => void;
+  setSettingsTestResult: (res: { ok: boolean; message: string; failure?: FailurePresentation } | null) => void;
+  showBanner: (type: 'success' | 'error' | 'info', message: string, details?: string, scope?: string, failure?: FailurePresentation, operation?: OperationLabel, engine?: ContainerEngine) => void;
   dismissBanner: (id?: number) => void;
+  resolveBannerScope: (scope: string) => void;
   pauseBanner: (id: number) => void;
   resumeBanner: (id: number) => void;
 }
@@ -497,6 +507,30 @@ function emptyEngineResources() {
   };
 }
 
+function resetEngineContext(state: StudioState) {
+  const banners = state.banners.filter((banner) => !banner.engine);
+  const retained = new Set(banners.map((banner) => banner.id));
+  const pausedBanners = Object.fromEntries(
+    Object.entries(state.pausedBanners).filter(([id]) => retained.has(Number(id)))
+  );
+  return {
+    ...emptyEngineResources(),
+    banners,
+    pausedBanners,
+    settingsTestResult: null,
+    imageResults: [],
+    imageSearchError: null,
+    imageSearchFailure: null,
+    composeProject: {
+      ...state.composeProject,
+      revision: null,
+      error: null,
+      resolving: Boolean(state.activeFile),
+      dependenciesIncomplete: false,
+    },
+  };
+}
+
 export const useStudioStore = create<StudioState>((set) => ({
   activePage: 'compose',
   setActivePage: (activePage) => set({ activePage }),
@@ -506,7 +540,7 @@ export const useStudioStore = create<StudioState>((set) => ({
     set((state) => ({
       engine,
       settings: state.settings ? { ...state.settings, engine } : state.settings,
-      ...(state.engine !== engine ? emptyEngineResources() : {}),
+      ...(state.engine !== engine ? resetEngineContext(state) : {}),
     })),
 
   languageSetting: 'auto',
@@ -541,6 +575,7 @@ export const useStudioStore = create<StudioState>((set) => ({
   selectedDirectory: null,
   imageResults: [],
   imageSearchError: null,
+  imageSearchFailure: null,
   operationInProgress: null,
   operationsInProgress: {},
   operationLabels: {},
@@ -604,7 +639,7 @@ export const useStudioStore = create<StudioState>((set) => ({
   setComposeContainers: (composeContainers) => set({ composeContainers }),
   setSelectedDirectory: (selectedDirectory) => set({ selectedDirectory }),
   setImageResults: (imageResults) => set({ imageResults }),
-  setImageSearchError: (imageSearchError) => set({ imageSearchError }),
+  setImageSearchError: (imageSearchError, failure) => set({ imageSearchError, imageSearchFailure: failure || null }),
   beginOperation: (op, label, id, snapshot) =>
     set((state) => {
       if (id && state.operationTokens[id]) {
@@ -724,23 +759,42 @@ export const useStudioStore = create<StudioState>((set) => ({
         settings.resolvedLanguage ||
         (langSetting === 'auto' ? normalizeLocaleCode(hostLang) : langSetting);
       const nextEngine: ContainerEngine = settings.engine === 'podman' ? 'podman' : 'docker';
+      const previousPath = state.settings &&
+        (state.engine === 'podman' ? state.settings.podmanPath : state.settings.dockerPath);
+      const nextPath = nextEngine === 'podman' ? settings.podmanPath : settings.dockerPath;
+      const contextChanged = state.engine !== nextEngine ||
+        (previousPath !== null && previousPath !== undefined && previousPath !== nextPath);
       return {
         settings: { ...settings, engine: nextEngine },
         engine: nextEngine,
         languageSetting: langSetting,
         vscodeLanguage: hostLang,
         resolvedLocale,
-        ...(state.engine !== nextEngine ? emptyEngineResources() : {}),
+        ...(contextChanged ? resetEngineContext(state) : {}),
       };
     }),
   setSettingsTestResult: (settingsTestResult) => set({ settingsTestResult }),
-  showBanner: (type, message, details) =>
+  showBanner: (type, message, details, scope, failure, operation, engine) =>
     set((state) => {
+      if (type === 'error' && scope) {
+        const existing = state.banners.find((banner) =>
+          banner.type === 'error' && banner.scope === scope && banner.engine === engine);
+        if (existing) {
+          if (existing.message === message && existing.details === details &&
+              JSON.stringify(existing.failure) === JSON.stringify(failure)) return state;
+          return {
+            banners: state.banners.map((banner) =>
+              banner.id === existing.id ? { ...banner, message, details, failure } : banner),
+          };
+        }
+      }
       if (type === 'error' && state.banners.some((banner) =>
-        banner.type === type && banner.message === message && banner.details === details)) {
+        banner.type === type && banner.scope === scope && banner.engine === engine &&
+        banner.message === message && banner.details === details &&
+        JSON.stringify(banner.failure) === JSON.stringify(failure))) {
         return state;
       }
-      return { banners: [...state.banners, { id: ++nextBannerId, type, message, details }] };
+      return { banners: [...state.banners, { id: ++nextBannerId, type, message, engine, details, scope, failure, operation }] };
     }),
   dismissBanner: (id) =>
     set((state) => {
@@ -748,6 +802,15 @@ export const useStudioStore = create<StudioState>((set) => ({
       if (id === undefined) return { banners: [], pausedBanners: {} };
       delete pausedBanners[id];
       return { banners: state.banners.filter((banner) => banner.id !== id), pausedBanners };
+    }),
+  resolveBannerScope: (scope) =>
+    set((state) => {
+      const resolved = state.banners.filter((banner) => banner.type === 'error' && banner.scope === scope);
+      if (resolved.length === 0) return state;
+      const ids = new Set(resolved.map((banner) => banner.id));
+      const pausedBanners = { ...state.pausedBanners };
+      for (const id of ids) delete pausedBanners[id];
+      return { banners: state.banners.filter((banner) => !ids.has(banner.id)), pausedBanners };
     }),
   pauseBanner: (id) =>
     set((state) => state.banners.some((banner) => banner.id === id)
@@ -810,7 +873,7 @@ export function useStudioMessageBridge(): void {
           break;
         case 'compose:image:results':
           store.setImageResults(Array.isArray(p?.results) ? p.results : []);
-          store.setImageSearchError(typeof p?.error === 'string' ? p.error : null);
+          store.setImageSearchError(typeof p?.error === 'string' ? p.error : null, p?.failure);
           break;
         case 'operation:start':
           if (p && typeof p === 'object' && typeof p.key === 'string') {
@@ -850,14 +913,18 @@ export function useStudioMessageBridge(): void {
         case 'notification':
           if (p?.message) {
             store.showBanner(p.type || 'success', String(p.message),
-              typeof p.details === 'string' ? p.details : undefined);
+              typeof p.details === 'string' ? p.details : undefined, undefined, undefined, p.operation, msg.engine);
           }
           break;
         case 'error':
           if (p?.message) {
             store.showBanner('error', String(p.message),
-              typeof p.details === 'string' ? p.details : undefined);
+              typeof p.details === 'string' ? p.details : undefined,
+              typeof p.scope === 'string' ? p.scope : undefined, p.failure, undefined, msg.engine);
           }
+          break;
+        case 'error:resolved':
+          if (typeof p?.scope === 'string') store.resolveBannerScope(p.scope);
           break;
         case 'system:info:update':
           store.setSystemInfo(p ?? null);
@@ -920,6 +987,7 @@ export function useStudioMessageBridge(): void {
             store.setSettingsTestResult({
               ok: Boolean(p.ok),
               message: String(p.message || ''),
+              failure: p.failure,
             });
           }
           break;
@@ -927,9 +995,9 @@ export function useStudioMessageBridge(): void {
     };
     const unsubscribe = onMessage(handleMessage);
 
-    postMessage('dashboard:get');
     postMessage('settings:get');
     postMessage('operations:get');
+    postMessage('dashboard:get', { reuseInFlight: true });
 
     return unsubscribe;
   }, [onMessage, postMessage]);

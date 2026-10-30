@@ -4,6 +4,22 @@ All notable changes to **Docker and Podman Studio** will be documented in this f
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-10-30
+
+### Changed
+- Made Studio navigation, page headers, tables, feedback, and dialogs more usable in smaller windows.
+- Unified Compose service selection actions with the existing project toolbar, and made resource cleanup actions contextual to the current selection.
+- Group badges now reflect the member requiring the most attention, including members hidden by filters.
+- Increased short engine command and registry request timeouts to 30 seconds without shortening long-running actions.
+- Presented recoverable problems as warnings while keeping serious failures distinct and technical details available.
+
+### Fixed
+- Restored ongoing progress and loaded resources when reopening Studio without accumulating refresh indicators.
+- Cleared matching errors after recovery while retaining unrelated and partially unresolved failures.
+- Removed engine-specific feedback when switching, preserved unrelated file and settings errors, and prevented late attempts from restoring stale errors.
+- Localized common failure explanations and updated visible operation labels when the language changes.
+- Distinguished missing files from missing commands and clarified when a Compose file was created but could not be fully registered.
+
 ## [1.4.0] - 2026-10-30
 
 ### Added
