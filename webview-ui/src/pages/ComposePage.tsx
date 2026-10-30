@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Boxes,
   ChevronDown,
@@ -13,11 +13,13 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
+  Settings2,
   Square,
   Terminal,
   Trash2,
 } from 'lucide-react';
 import { CreateComposeModal } from '../components/CreateComposeModal';
+import { ComposeOptionsModal } from '../components/ComposeOptionsModal';
 import { LogViewer } from '../components/LogViewer';
 import { SelectionBar, useResourceSelection } from '../components/ResourceSelection';
 import {
@@ -31,9 +33,15 @@ import {
   StatusBadge,
 } from '../components/Shared';
 import { TopologyView } from '../components/TopologyView';
+import { VisualServiceEditor } from '../components/VisualServiceEditor';
 import { groupComposeContainers, parseDesiredReplicas, summarizeComposeService } from '../composeStatus';
+import { displayEnvironmentValue, environmentLines } from '../composeSecrets';
+import { composeLogKey, composeLogReplicaSignature } from '../../../src/shared/composeLogs';
+import { ComposeBuilderSpec, validateComposeBuilder } from '../../../src/shared/composeBuilder';
+import { applyVisualServiceDraft, createVisualServiceDraft } from '../../../src/shared/composeVisualEdit';
 import { useI18n } from '../i18n';
-import { useStudioStore } from '../store';
+import { useComposeExtras } from '../i18n/composeExtras';
+import { LogEntry, useStudioStore } from '../store';
 import { useVsCodeMessaging } from '../vscode';
 
 type ComposeTab =
@@ -63,33 +71,23 @@ function toStringList(value: any): string[] {
   return [String(value)];
 }
 
-function serializeServicePreview(def: Record<string, any>): string {
-  const lines: string[] = [];
-  for (const [k, v] of Object.entries(def || {})) {
-    if (Array.isArray(v)) {
-      lines.push(`${k}:`);
-      v.forEach((item) =>
-        lines.push(`  - ${typeof item === 'string' ? item : JSON.stringify(item)}`)
-      );
-    } else if (v && typeof v === 'object') {
-      lines.push(`${k}:`);
-      for (const [sk, sv] of Object.entries(v)) {
-        lines.push(`  ${sk}: ${typeof sv === 'string' ? sv : JSON.stringify(sv)}`);
-      }
-    } else {
-      lines.push(`${k}: ${v}`);
-    }
-  }
-  return lines.join('\n');
-}
-
 export const ComposePage: React.FC = () => {
   const { t, fmt, engine, engineLabel } = useI18n();
-  const { postMessage } = useVsCodeMessaging();
+  const extra = useComposeExtras();
+  const { postMessage, onMessage } = useVsCodeMessaging();
   const {
     document,
     activeFile,
     rawYaml,
+    composeParseError,
+    composeProject,
+    serviceFragments,
+    composeDrafts,
+    composeServiceDrafts,
+    pendingComposeEdits,
+    setComposeDraft,
+    setComposeServiceDraft,
+    beginComposeEdit,
     composeFiles,
     composeContainers,
     operationInProgress,
@@ -97,30 +95,78 @@ export const ComposePage: React.FC = () => {
     logFilter,
     setLogFilter,
     clearLogs,
+    setActiveLogTarget,
   } = useStudioStore();
 
   const [tab, setTab] = useState<ComposeTab>('overview');
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showProjectOptions, setShowProjectOptions] = useState(false);
   const [expandedServices, setExpandedServices] = useState<Record<string, boolean>>({});
-  const [editingService, setEditingService] = useState<string | null>(null);
-  const [serviceYamlDraft, setServiceYamlDraft] = useState('');
   const [removeServiceTarget, setRemoveServiceTarget] = useState<string | null>(null);
   const [scaleTarget, setScaleTarget] = useState<string | null>(null);
   const [scaleReplicas, setScaleReplicas] = useState('');
+  const [showSensitive, setShowSensitive] = useState(false);
+  const [serviceEditError, setServiceEditError] = useState('');
 
   useEffect(() => {
     setScaleTarget(null);
+    setShowProjectOptions(false);
+    setServiceEditError('');
   }, [activeFile, engine]);
 
-  // Raw YAML draft
-  const [yamlDraft, setYamlDraft] = useState('');
-  useEffect(() => {
-    setYamlDraft(rawYaml);
-  }, [rawYaml]);
+  const draft = activeFile ? composeDrafts[activeFile] : undefined;
+  const yamlDraft = draft?.text ?? rawYaml;
+  const yamlDirty = Boolean(draft && draft.text !== draft.base);
+  const yamlConflict = Boolean(yamlDirty && draft && draft.base !== rawYaml);
+  const serviceDraft = activeFile ? composeServiceDrafts[activeFile] : undefined;
+  const editingService = serviceDraft?.name ?? null;
+  const serviceYamlDraft = serviceDraft?.text ?? '';
+  const savingYaml = Object.values(pendingComposeEdits).some((edit) =>
+    edit.file === activeFile && edit.kind === 'raw');
+  const projectReady = Boolean(composeProject.revision && !composeProject.error && !composeProject.resolving);
+  const editorContextBlocked = yamlDirty || savingYaml || Boolean(composeParseError) || !projectReady;
+  const projectActionsBlocked = editorContextBlocked || Boolean(serviceDraft);
+  const visualEditingBlocked = editorContextBlocked || composeProject.customized;
+  const otherVisualEditsBlocked = visualEditingBlocked || Boolean(serviceDraft);
+  const editContext = { file: activeFile, engine, projectRevision: composeProject.revision };
+  const actionContext = { ...editContext, rawYaml };
+  const pendingEdits = useRef(new Map<string, {
+    file: string;
+    kind: 'service' | 'builder' | 'raw';
+    name: string;
+    snapshot?: string;
+  }>());
+  const builderSnapshot = useRef('');
+
+  useEffect(() => onMessage((message) => {
+    if ((message.command !== 'compose:edit:saved' && message.command !== 'compose:edit:failed') ||
+        !message.requestId) return;
+    const pending = pendingEdits.current.get(message.requestId);
+    pendingEdits.current.delete(message.requestId);
+    if (pending?.kind === 'builder' && message.command === 'compose:edit:saved' &&
+        useStudioStore.getState().activeFile === pending.file &&
+        message.payload?.file === pending.file && builderSnapshot.current === pending.snapshot) {
+      setBName((current) => current === pending.name ? '' : current);
+    }
+  }), [onMessage]);
+
+  const newEditRequest = (kind: 'service' | 'builder' | 'raw', name: string, base: string, text?: string) => {
+    if (!activeFile) return undefined;
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    pendingEdits.current.set(requestId, { file: activeFile, kind, name, snapshot: text });
+    beginComposeEdit(requestId, { file: activeFile, kind, name, base, snapshot: text });
+    return requestId;
+  };
+  const savingService = Object.values(pendingComposeEdits).some((edit) =>
+    edit.file === activeFile && edit.kind === 'service');
+  const savingBuilder = Object.values(pendingComposeEdits).some((edit) =>
+    edit.file === activeFile && edit.kind === 'builder');
 
   // Logs tab state
   const [selectedLogService, setSelectedLogService] = useState<string>('');
+  const [selectedLogContainer, setSelectedLogContainer] = useState('');
   const [logPaused, setLogPaused] = useState(false);
+  const [pausedLogEntries, setPausedLogEntries] = useState<LogEntry[]>([]);
 
   // Resources tab forms
   const [newNetName, setNewNetName] = useState('');
@@ -131,11 +177,33 @@ export const ComposePage: React.FC = () => {
   // Builder tab form
   const [bName, setBName] = useState('');
   const [bImage, setBImage] = useState('docker.io/library/redis:7-alpine');
+  const [bBuildImage, setBBuildImage] = useState('');
+  const [bSource, setBSource] = useState<'image' | 'build'>('image');
+  const [bBuildContext, setBBuildContext] = useState('.');
+  const [bDockerfile, setBDockerfile] = useState(engine === 'podman' ? 'Containerfile' : 'Dockerfile');
+  const [bContainerName, setBContainerName] = useState('');
+  const [bCommand, setBCommand] = useState('');
   const [bPorts, setBPorts] = useState('');
   const [bEnv, setBEnv] = useState('');
   const [bVolumes, setBVolumes] = useState('');
   const [bDepends, setBDepends] = useState('');
   const [bRestart, setBRestart] = useState('unless-stopped');
+  const builderSpec = useMemo<ComposeBuilderSpec>(() => ({
+    services: [{
+      name: bName, containerName: bContainerName, source: bSource,
+      image: bSource === 'build' ? bBuildImage : bImage,
+      buildContext: bBuildContext, buildDockerfile: bDockerfile,
+      ports: bPorts.split(/[\r\n,]+/), restartPolicy: bRestart,
+      networkName: '', volumeName: '', volumesText: bVolumes, environmentText: bEnv,
+      dependsText: bDepends, commandText: bCommand,
+    }],
+  }), [bName, bContainerName, bSource, bImage, bBuildImage, bBuildContext, bDockerfile,
+    bPorts, bRestart, bVolumes, bEnv, bDepends, bCommand]);
+  const builderErrors = useMemo(
+    () => validateComposeBuilder(builderSpec, document?.services || {}),
+    [builderSpec, document]
+  );
+  builderSnapshot.current = JSON.stringify(builderSpec);
 
   const busy = Boolean(operationInProgress);
 
@@ -147,15 +215,18 @@ export const ComposePage: React.FC = () => {
   const serviceSelection = useResourceSelection(
     serviceNames, serviceNames, serviceSelectionKey, `${engine}\0${activeFile || ''}`
   );
-  const runSelectedServices = (action: 'up' | 'stop' | 'restart' | 'down' | 'build') => {
+  type ServiceAction = 'up' | 'stop' | 'restart' | 'down' | 'build' | 'rebuild' | 'build-up';
+  const runServices = (action: ServiceAction, services: string[]) => {
+    if (busy || !projectReady || (action !== 'stop' && action !== 'down' && projectActionsBlocked)) return;
     postMessage('stack:services:batch', {
+      ...actionContext,
       action,
-      services: serviceSelection.selected,
-      file: activeFile,
-      engine,
-      rawYaml,
+      services,
     });
   };
+  const runSelectedServices = (action: ServiceAction) => runServices(action, serviceSelection.selected);
+  const selectedServicesBuildable = serviceSelection.selected.length > 0 &&
+    serviceSelection.selected.every((name) => Boolean(document?.services?.[name]?.build));
 
   const summaryByService = useMemo(() => {
     const map = new Map<string, ReturnType<typeof summarizeComposeService>>();
@@ -215,12 +286,13 @@ export const ComposePage: React.FC = () => {
       (r) =>
         r.service.toLowerCase().includes(q) ||
         r.key.toLowerCase().includes(q) ||
-        r.value.toLowerCase().includes(q)
+        displayEnvironmentValue(r.key, r.value, showSensitive, extra.maskedValue).toLowerCase().includes(q)
     );
-  }, [allVariables, varSearch]);
+  }, [allVariables, varSearch, showSensitive, extra.maskedValue]);
 
   const openLogsForService = (svcName: string) => {
     setSelectedLogService(svcName);
+    setSelectedLogContainer('');
     setLogPaused(false);
     setTab('logs');
   };
@@ -229,10 +301,14 @@ export const ComposePage: React.FC = () => {
     selectedLogService && document?.services &&
     Object.prototype.hasOwnProperty.call(document.services, selectedLogService)
   );
+  const logReplicaSet = useMemo(() => composeLogReplicaSignature(
+    composeContainers, selectedLogService, selectedLogContainer
+  ), [composeContainers, selectedLogContainer, selectedLogService]);
 
   useEffect(() => {
     clearLogs();
     setLogPaused(false);
+    setSelectedLogContainer('');
   }, [activeFile, clearLogs]);
 
   useEffect(() => {
@@ -240,77 +316,63 @@ export const ComposePage: React.FC = () => {
       const next = servicesEntries[0]?.[0] || '';
       if (next !== selectedLogService) {
         setSelectedLogService(next);
+        setSelectedLogContainer('');
         setLogPaused(false);
       }
     }
   }, [tab, selectedLogService, selectedLogServiceExists, servicesEntries]);
 
   useEffect(() => {
-    if (tab !== 'logs' || !activeFile || !selectedLogServiceExists || logPaused) {
+    if (selectedLogContainer && !composeContainers.some((item) =>
+      item.service === selectedLogService && item.fullId === selectedLogContainer
+    )) {
+      setSelectedLogContainer('');
+      setLogPaused(false);
+    }
+  }, [composeContainers, selectedLogContainer, selectedLogService]);
+
+  useEffect(() => {
+    if (tab !== 'logs' || !activeFile || !selectedLogServiceExists ||
+        !projectReady || !composeProject.revision) {
       return;
     }
+    const key = composeLogKey(activeFile, engine, composeProject.revision, selectedLogService, selectedLogContainer);
+    const target = {
+      ...actionContext, service: selectedLogService,
+      containerId: selectedLogContainer || undefined,
+    };
     clearLogs();
-    postMessage('logs:start', { service: selectedLogService });
-    return () => postMessage('logs:stop', { service: selectedLogService });
-  }, [tab, activeFile, selectedLogService, selectedLogServiceExists, logPaused, clearLogs, postMessage]);
+    setActiveLogTarget(key);
+    postMessage('logs:start', target);
+    return () => {
+      postMessage('logs:stop', target);
+      if (useStudioStore.getState().activeLogTarget === key) setActiveLogTarget(null);
+    };
+  }, [tab, activeFile, selectedLogService, selectedLogContainer, selectedLogServiceExists, projectReady,
+    composeProject.revision, engine, rawYaml, logReplicaSet, clearLogs, setActiveLogTarget, postMessage]);
 
   const handleServiceAction = (
     action: 'start' | 'stop' | 'down' | 'restart',
     serviceName: string
   ) => {
     if (action === 'start') {
-      postMessage('stack:up', { services: [serviceName] });
+      runServices('up', [serviceName]);
     } else if (action === 'stop') {
-      postMessage('stack:stop', { services: [serviceName] });
+      runServices('stop', [serviceName]);
     } else if (action === 'restart') {
-      postMessage('stack:restart', { services: [serviceName] });
+      runServices('restart', [serviceName]);
     } else if (action === 'down') {
-      postMessage('stack:down', { services: [serviceName] });
+      runServices('down', [serviceName]);
     }
   };
 
   const handleBuilderAdd = () => {
-    if (!bName.trim()) {
-      return;
-    }
-    const envLines = bEnv
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter(Boolean);
-    const environment =
-      envLines.length > 0
-        ? Object.fromEntries(
-            envLines.map((l) => {
-              const idx = l.indexOf('=');
-              return idx === -1 ? [l, ''] : [l.slice(0, idx).trim(), l.slice(idx + 1).trim()];
-            })
-          )
-        : undefined;
-
+    if (builderErrors.length || visualEditingBlocked || serviceDraft || savingBuilder) return;
     postMessage('service:add', {
-      name: bName.trim(),
-      image: bImage.trim() || 'docker.io/library/alpine:latest',
-      ports: bPorts
-        .split(/[\r\n,]+/)
-        .map((s) => s.trim())
-        .filter(Boolean),
-      environment,
-      volumes: bVolumes
-        .split(/\r?\n/)
-        .map((s) => s.trim())
-        .filter(Boolean),
-      depends_on: bDepends
-        .split(/[\r\n,]+/)
-        .map((s) => s.trim())
-        .filter(Boolean),
-      restart: bRestart,
-    });
-    setBName('');
-    setBPorts('');
-    setBEnv('');
-    setBVolumes('');
-    setBDepends('');
-    setTab('services');
+      ...editContext,
+      baseYaml: rawYaml,
+      spec: builderSpec,
+    }, newEditRequest('builder', bName.trim(), rawYaml, builderSnapshot.current));
   };
 
   const tabs: Array<{ id: ComposeTab; label: string; count?: number }> = [
@@ -362,6 +424,15 @@ export const ComposePage: React.FC = () => {
               icon={<FolderOpen className="w-3.5 h-3.5" />}
               onClick={() => postMessage('compose:file:pick')}
             />
+            {activeFile && composeProject.options && (
+              <ActionPillButton
+                label={extra.projectOptions}
+                disabled={busy || Boolean(serviceDraft) || yamlDirty || savingYaml}
+                title={serviceDraft ? extra.finishServiceEdit : yamlDirty ? extra.draftPending : undefined}
+                icon={<Settings2 className="w-3.5 h-3.5" />}
+                onClick={() => setShowProjectOptions(true)}
+              />
+            )}
             {composeFiles.length > 0 && (
               <select
                 value={activeFile || ''}
@@ -422,42 +493,59 @@ export const ComposePage: React.FC = () => {
                 variant="primary"
                 loading={operationInProgress === 'start'}
                 loadingLabel={t.common.startingOp}
-                disabled={busy}
+                disabled={busy || projectActionsBlocked}
                 icon={<Play className="w-3.5 h-3.5" />}
-                onClick={() => postMessage('stack:up', {})}
+                onClick={() => postMessage('stack:up', actionContext)}
               />
               <ActionPillButton
                 label={t.common.stop}
                 loading={operationInProgress === 'stop'}
                 loadingLabel={t.common.stoppingOp}
-                disabled={busy}
+                disabled={busy || !projectReady}
                 icon={<Square className="w-3.5 h-3.5" />}
-                onClick={() => postMessage('stack:stop', {})}
+                onClick={() => postMessage('stack:stop', actionContext)}
               />
               <ActionPillButton
                 label={t.common.restart}
                 loading={operationInProgress === 'restart'}
                 loadingLabel={t.common.restartingOp}
-                disabled={busy}
+                disabled={busy || projectActionsBlocked}
                 icon={<RotateCcw className="w-3.5 h-3.5" />}
-                onClick={() => postMessage('stack:restart', {})}
+                onClick={() => postMessage('stack:restart', actionContext)}
               />
               <ActionPillButton
                 label={t.common.build}
                 loading={operationInProgress === 'build'}
                 loadingLabel={t.common.buildingOp}
-                disabled={busy}
+                disabled={busy || projectActionsBlocked}
+                title={extra.buildOnlyHint}
                 icon={<Hammer className="w-3.5 h-3.5" />}
-                onClick={() => postMessage('stack:build', {})}
+                onClick={() => postMessage('stack:build', actionContext)}
+              />
+              <ActionPillButton
+                label={extra.rebuild}
+                loading={operationInProgress === 'rebuild'}
+                disabled={busy || projectActionsBlocked}
+                title={extra.rebuildHint}
+                icon={<Hammer className="w-3.5 h-3.5" />}
+                onClick={() => postMessage('stack:build', { ...actionContext, noCache: true })}
+              />
+              <ActionPillButton
+                label={extra.buildUp}
+                loading={operationInProgress === 'build-up'}
+                disabled={busy || projectActionsBlocked}
+                title={extra.buildUpHint}
+                icon={<Play className="w-3.5 h-3.5" />}
+                onClick={() => postMessage('stack:build:up', actionContext)}
               />
               <ActionPillButton
                 label={t.common.down}
                 variant="danger"
                 loading={operationInProgress === 'down'}
                 loadingLabel={t.common.removingOp}
-                disabled={busy}
+                disabled={busy || !projectReady}
                 icon={<Trash2 className="w-3.5 h-3.5" />}
-                onClick={() => postMessage('stack:down', {})}
+                onClick={() => postMessage('stack:down', actionContext)}
               />
             </div>
           )}
@@ -466,6 +554,28 @@ export const ComposePage: React.FC = () => {
 
       {/* Main Workspace Area */}
       <div className="flex-1 overflow-auto p-6">
+        {activeFile && (composeProject.resolving || composeProject.error || composeProject.customized) && (
+          <div role={composeProject.error ? 'alert' : 'status'}
+            className="mb-4 bg-panel-card border border-panel-border rounded-md px-4 py-2.5 text-xs text-text-secondary space-y-1">
+            {composeProject.resolving ? extra.projectResolving : composeProject.error
+              ? `${extra.projectFailed} ${composeProject.error}`
+              : extra.projectResolved}
+            {composeProject.customized && !composeProject.error && !composeProject.resolving && (
+              <p>{extra.projectEditingHint}</p>
+            )}
+          </div>
+        )}
+        {activeFile && composeProject.dependenciesIncomplete && !composeParseError && (
+          <div role="status" className="mb-4 bg-yellow-500/10 border border-accent-orange rounded-md px-4 py-2.5 text-xs text-accent-orange">
+            {extra.projectDependenciesIncomplete}
+          </div>
+        )}
+        {activeFile && yamlDirty && tab !== 'yaml' && (
+          <div role="status" className="mb-4 bg-yellow-500/10 border border-accent-orange rounded-md px-4 py-2.5 text-xs text-accent-orange flex items-center justify-between gap-3">
+            <span>{yamlConflict ? extra.draftConflict : extra.draftPending}</span>
+            <SmallActionButton label={extra.openYaml} onClick={() => setTab('yaml')} />
+          </div>
+        )}
         {!document || !activeFile ? (
           <EmptyState
             icon={<FileCode2 className="w-10 h-10 text-accent-purple" />}
@@ -486,6 +596,12 @@ export const ComposePage: React.FC = () => {
                 />
               </>
             }
+          />
+        ) : composeParseError && tab !== 'yaml' ? (
+          <EmptyState
+            title={extra.invalidYaml}
+            description={composeParseError}
+            action={<ActionPillButton label={extra.openYaml} onClick={() => setTab('yaml')} />}
           />
         ) : (
           <>
@@ -600,12 +716,12 @@ export const ComposePage: React.FC = () => {
                             <SmallActionButton
                               label={t.common.start}
                               accent
-                              disabled={busy || isRunning}
+                              disabled={busy || isRunning || projectActionsBlocked}
                               onClick={() => handleServiceAction('start', svcName)}
                             />
                             <SmallActionButton
                               label={t.common.stop}
-                              disabled={busy || !isRunning}
+                              disabled={busy || !isRunning || !projectReady}
                               onClick={() => handleServiceAction('stop', svcName)}
                             />
                             <SmallActionButton
@@ -626,9 +742,11 @@ export const ComposePage: React.FC = () => {
               <TopologyView
                 document={document}
                 containers={composeContainers}
-                busy={busy}
+                busy={busy || !projectReady}
+                startDisabled={projectActionsBlocked}
                 onServiceAction={handleServiceAction}
                 onOpenLogs={openLogsForService}
+                onOpenResources={() => setTab('resources')}
                 onSelectService={(svcName) => {
                   setExpandedServices((prev) => ({ ...prev, [svcName]: true }));
                   setTab('services');
@@ -643,40 +761,54 @@ export const ComposePage: React.FC = () => {
                   <SmallActionButton
                     label={`${t.common.start} (${serviceSelection.selected.length})`}
                     accent
-                    disabled={busy}
+                    disabled={busy || projectActionsBlocked}
                     icon={<Play className="w-3 h-3" />}
-                    title={t.compose.batchUpHint}
+                    title={extra.batchStartHint}
                     onClick={() => runSelectedServices('up')}
                   />
                   <SmallActionButton
                     label={`${t.common.stop} (${serviceSelection.selected.length})`}
-                    disabled={busy}
+                    disabled={busy || !projectReady}
                     icon={<Square className="w-3 h-3" />}
                     onClick={() => runSelectedServices('stop')}
                   />
                   <SmallActionButton
                     label={`${t.common.restart} (${serviceSelection.selected.length})`}
-                    disabled={busy}
+                    disabled={busy || projectActionsBlocked}
                     icon={<RotateCcw className="w-3 h-3" />}
                     onClick={() => runSelectedServices('restart')}
                   />
                   <SmallActionButton
                     label={`${t.common.build} (${serviceSelection.selected.length})`}
-                    disabled={busy}
+                    disabled={busy || projectActionsBlocked || !selectedServicesBuildable}
                     icon={<Hammer className="w-3 h-3" />}
-                    title={t.compose.batchUpHint}
+                    title={selectedServicesBuildable ? extra.buildOnlyHint : extra.selectedBuildHint}
                     onClick={() => runSelectedServices('build')}
+                  />
+                  <SmallActionButton
+                    label={`${extra.rebuild} (${serviceSelection.selected.length})`}
+                    disabled={busy || projectActionsBlocked || !selectedServicesBuildable}
+                    icon={<Hammer className="w-3 h-3" />}
+                    title={selectedServicesBuildable ? extra.rebuildHint : extra.selectedBuildHint}
+                    onClick={() => runSelectedServices('rebuild')}
+                  />
+                  <SmallActionButton
+                    label={`${extra.buildUp} (${serviceSelection.selected.length})`}
+                    disabled={busy || projectActionsBlocked || !selectedServicesBuildable}
+                    icon={<Play className="w-3 h-3" />}
+                    title={selectedServicesBuildable ? extra.buildUpHint : extra.selectedBuildHint}
+                    onClick={() => runSelectedServices('build-up')}
                   />
                   <SmallActionButton
                     label={`${t.common.down} (${serviceSelection.selected.length})`}
                     danger
-                    disabled={busy}
+                    disabled={busy || !projectReady}
                     icon={<Trash2 className="w-3 h-3" />}
                     onClick={() => runSelectedServices('down')}
                   />
                 </SelectionBar>
                 {serviceSelection.selected.length > 0 && (
-                  <p className="text-xs text-text-secondary">{t.compose.batchUpHint}</p>
+                  <p className="text-xs text-text-secondary">{extra.batchStartHint}</p>
                 )}
                 {servicesEntries.map(([svcName, svc]) => {
                   const summary = summaryByService.get(svcName);
@@ -739,26 +871,47 @@ export const ComposePage: React.FC = () => {
                           <SmallActionButton
                             label={t.common.start}
                             accent
-                            disabled={busy || isActive}
+                            disabled={busy || isActive || projectActionsBlocked}
                             icon={<Play className="w-3 h-3" />}
                             onClick={() => handleServiceAction('start', svcName)}
                           />
                           <SmallActionButton
                             label={t.common.stop}
-                            disabled={busy || !isActive}
+                            disabled={busy || !isActive || !projectReady}
                             icon={<Square className="w-3 h-3" />}
                             onClick={() => handleServiceAction('stop', svcName)}
                           />
                           <SmallActionButton
                             label={t.common.restart}
-                            disabled={busy}
+                            disabled={busy || projectActionsBlocked}
                             icon={<RotateCcw className="w-3 h-3" />}
                             onClick={() => handleServiceAction('restart', svcName)}
+                          />
+                          <SmallActionButton
+                            label={t.common.build}
+                            disabled={busy || projectActionsBlocked || !svc?.build}
+                            icon={<Hammer className="w-3 h-3" />}
+                            title={svc?.build ? extra.buildOnlyHint : extra.selectedBuildHint}
+                            onClick={() => runServices('build', [svcName])}
+                          />
+                          <SmallActionButton
+                            label={extra.rebuild}
+                            disabled={busy || projectActionsBlocked || !svc?.build}
+                            icon={<Hammer className="w-3 h-3" />}
+                            title={svc?.build ? extra.rebuildHint : extra.selectedBuildHint}
+                            onClick={() => runServices('rebuild', [svcName])}
+                          />
+                          <SmallActionButton
+                            label={extra.buildUp}
+                            disabled={busy || projectActionsBlocked || !svc?.build}
+                            icon={<Play className="w-3 h-3" />}
+                            title={svc?.build ? extra.buildUpHint : extra.selectedBuildHint}
+                            onClick={() => runServices('build-up', [svcName])}
                           />
                           {engine === 'podman' && (
                             <SmallActionButton
                               label={t.compose.scaleService}
-                              disabled={busy}
+                              disabled={busy || projectActionsBlocked}
                               icon={<Boxes className="w-3 h-3" />}
                               onClick={() => {
                                 setScaleReplicas('');
@@ -784,24 +937,38 @@ export const ComposePage: React.FC = () => {
                             onClick={() => openLogsForService(svcName)}
                           />
                           <SmallActionButton
-                            label={t.compose.editYamlBtn}
-                            disabled={isActive}
+                            label={extra.editService}
+                            disabled={isActive || visualEditingBlocked || serviceFragments[svcName] === undefined ||
+                              Boolean(serviceDraft)}
                             title={
                               isActive
                                 ? t.compose.editLockedTooltip
+                                : serviceDraft
+                                ? extra.finishServiceEdit
+                                : serviceFragments[svcName] === undefined
+                                ? extra.fragmentUnavailable
                                 : t.compose.editTooltip
                             }
                             icon={isActive ? <Lock className="w-3 h-3" /> : <Edit3 className="w-3 h-3" />}
                             onClick={() => {
                               setExpandedServices((prev) => ({ ...prev, [svcName]: true }));
-                              setEditingService(svcName);
-                              setServiceYamlDraft(serializeServicePreview(svc));
+                              setServiceEditError('');
+                              let visual;
+                              try {
+                                visual = createVisualServiceDraft(serviceFragments[svcName]);
+                              } catch (error) {
+                                visual = undefined;
+                                setServiceEditError(error instanceof Error ? error.message : String(error));
+                              }
+                              setComposeServiceDraft(activeFile, {
+                                name: svcName, base: rawYaml, text: serviceFragments[svcName], visual,
+                              });
                             }}
                           />
                           <SmallActionButton
                             label={t.common.remove}
                             danger
-                            disabled={busy || isActive}
+                            disabled={busy || isActive || otherVisualEditsBlocked}
                             title={
                               isActive
                                 ? t.compose.removeLockedTooltip
@@ -841,29 +1008,86 @@ export const ComposePage: React.FC = () => {
                                 <div className="flex items-center gap-2">
                                   <SmallActionButton
                                     label={t.common.cancel}
-                                    onClick={() => setEditingService(null)}
+                                    disabled={savingService}
+                                    onClick={() => {
+                                      setServiceEditError('');
+                                      setComposeServiceDraft(activeFile, null);
+                                    }}
                                   />
                                   <ActionPillButton
                                     label={t.compose.saveServiceBtn}
                                     variant="podman"
-                                    disabled={engine === 'podman' && isActive}
+                                    loading={savingService}
+                                    loadingLabel={extra.savingService}
+                                    disabled={isActive || visualEditingBlocked || serviceDraft?.base !== rawYaml}
                                     icon={<Save className="w-3.5 h-3.5" />}
                                     onClick={() => {
+                                      if (!serviceDraft) return;
+                                      let fragment: string;
+                                      try {
+                                        fragment = serviceDraft.visual
+                                          ? applyVisualServiceDraft(serviceDraft.visual)
+                                          : serviceDraft.text;
+                                      } catch (error) {
+                                        setServiceEditError(error instanceof Error ? error.message : String(error));
+                                        return;
+                                      }
+                                      setServiceEditError('');
                                       postMessage('service:update', {
+                                        ...editContext,
+                                        baseYaml: serviceDraft?.base,
                                         name: svcName,
-                                        definitionYaml: serviceYamlDraft,
-                                      });
-                                      setEditingService(null);
+                                        definitionYaml: fragment,
+                                      }, newEditRequest('service', svcName, serviceDraft.base, JSON.stringify(serviceDraft)));
                                     }}
                                   />
                                 </div>
                               </div>
-                              <textarea
-                                value={serviceYamlDraft}
-                                readOnly={engine === 'podman' && isActive}
-                                onChange={(e) => setServiceYamlDraft(e.target.value)}
-                                className="input-field font-mono text-xs min-h-[220px]"
-                              />
+                              {serviceDraft?.base !== rawYaml && (
+                                <p role="alert" className="text-xs text-accent-orange">{extra.serviceConflict}</p>
+                              )}
+                              {serviceEditError && <p role="alert" className="text-xs text-accent-orange">{serviceEditError}</p>}
+                              <div className="flex gap-2">
+                                <SmallActionButton label={extra.visualEdit} disabled={Boolean(serviceDraft?.visual)}
+                                  onClick={() => {
+                                    if (!serviceDraft) return;
+                                    try {
+                                      setComposeServiceDraft(activeFile, {
+                                        ...serviceDraft, visual: createVisualServiceDraft(serviceDraft.text),
+                                      });
+                                      setServiceEditError('');
+                                    } catch (error) {
+                                      setServiceEditError(error instanceof Error ? error.message : String(error));
+                                    }
+                                  }} />
+                                <SmallActionButton label={extra.yamlEdit} disabled={!serviceDraft?.visual}
+                                  onClick={() => {
+                                    if (!serviceDraft?.visual) return;
+                                    try {
+                                      const text = applyVisualServiceDraft(serviceDraft.visual);
+                                      setComposeServiceDraft(activeFile, { ...serviceDraft, text, visual: undefined });
+                                      setServiceEditError('');
+                                    } catch (error) {
+                                      setServiceEditError(error instanceof Error ? error.message : String(error));
+                                    }
+                                  }} />
+                              </div>
+                              {serviceDraft?.visual ? (
+                                <VisualServiceEditor
+                                  draft={serviceDraft.visual}
+                                  disabled={isActive || visualEditingBlocked}
+                                  onChange={(visual) => setComposeServiceDraft(activeFile, { ...serviceDraft, visual })}
+                                />
+                              ) : (
+                                <textarea
+                                  value={serviceYamlDraft}
+                                  readOnly={isActive}
+                                  onChange={(e) => serviceDraft && setComposeServiceDraft(activeFile, {
+                                    ...serviceDraft, text: e.target.value,
+                                  })}
+                                  className="input-field font-mono text-xs min-h-[220px]"
+                                />
+                              )}
                             </div>
                           ) : (
                             <>
@@ -908,10 +1132,39 @@ export const ComposePage: React.FC = () => {
                                 />
                               </div>
 
+                              {composeContainers.some((item) => item.service === svcName) && (
+                                <div className="space-y-2">
+                                  <div className="text-xs font-medium text-text-secondary">{extra.replicaDetails}</div>
+                                  {composeContainers.filter((item) => item.service === svcName).map((item) => (
+                                    <div key={item.fullId || item.id}
+                                      className="bg-panel-card border border-panel-border rounded p-3 flex flex-wrap items-center gap-3 text-xs">
+                                      <span className="font-mono text-text-primary">{item.name || item.id}</span>
+                                      <StatusBadge status={item.status} />
+                                      {item.health && <span>{extra.health}: {item.health}</span>}
+                                      {item.exitCode !== undefined && <span>{extra.exitCode}: {item.exitCode}</span>}
+                                      {item.ports.length > 0 && (
+                                        <span className="font-mono text-text-secondary">
+                                          {extra.publishedPorts}: {item.ports.map((port) =>
+                                            `${port.hostIp ? `${port.hostIp}:` : ''}${port.host || '-'}:${port.container}/${port.protocol}`
+                                          ).join(', ')}
+                                        </span>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+
                               <CodeBlockCard
                                 title={t.compose.cardEnvVars}
-                                lines={toStringList(svc?.environment)}
+                                lines={environmentLines(svc?.environment, showSensitive, extra.maskedValue)}
                               />
+                              <div className="flex items-center gap-3">
+                                <SmallActionButton
+                                  label={showSensitive ? extra.hideSecrets : extra.maskSecrets}
+                                  onClick={() => setShowSensitive((current) => !current)}
+                                />
+                                <span className="text-xs text-text-secondary">{extra.maskSecretsHint}</span>
+                              </div>
                             </>
                           )}
                         </div>
@@ -925,6 +1178,13 @@ export const ComposePage: React.FC = () => {
             {/* TAB 4: VARIABLES */}
             {tab === 'variables' && (
               <div className="space-y-4">
+                <div className="flex items-center gap-3">
+                  <SmallActionButton
+                    label={showSensitive ? extra.hideSecrets : extra.maskSecrets}
+                    onClick={() => setShowSensitive((current) => !current)}
+                  />
+                  <span className="text-xs text-text-secondary">{extra.maskSecretsHint}</span>
+                </div>
                 <input
                   type="text"
                   value={varSearch}
@@ -953,7 +1213,7 @@ export const ComposePage: React.FC = () => {
                             <td className="px-4 py-2.5 text-accent-purple">{row.service}</td>
                             <td className="px-4 py-2.5 text-text-primary font-semibold">{row.key}</td>
                             <td className="px-4 py-2.5 text-text-secondary break-all">
-                              {row.value || '""'}
+                              {displayEnvironmentValue(row.key, row.value, showSensitive, extra.maskedValue) || '""'}
                             </td>
                           </tr>
                         ))}
@@ -993,14 +1253,15 @@ export const ComposePage: React.FC = () => {
                     <ActionPillButton
                       label={t.common.add}
                       variant="podman"
-                      disabled={!newNetName.trim()}
+                      disabled={!newNetName.trim() || otherVisualEditsBlocked}
                       icon={<Plus className="w-3.5 h-3.5" />}
                       onClick={() => {
                         postMessage('compose:network:add', {
+                          ...editContext,
+                          baseYaml: rawYaml,
                           name: newNetName.trim(),
                           driver: newNetDriver,
                         });
-                        setNewNetName('');
                       }}
                     />
                   </div>
@@ -1019,7 +1280,8 @@ export const ComposePage: React.FC = () => {
                         <SmallActionButton
                           label={t.common.remove}
                           danger
-                          onClick={() => postMessage('compose:network:remove', { name })}
+                          disabled={otherVisualEditsBlocked}
+                          onClick={() => postMessage('compose:network:remove', { ...editContext, baseYaml: rawYaml, name })}
                         />
                       </div>
                     ))}
@@ -1051,14 +1313,15 @@ export const ComposePage: React.FC = () => {
                     <ActionPillButton
                       label={t.common.add}
                       variant="podman"
-                      disabled={!newVolName.trim()}
+                      disabled={!newVolName.trim() || otherVisualEditsBlocked}
                       icon={<Plus className="w-3.5 h-3.5" />}
                       onClick={() => {
                         postMessage('compose:volume:add', {
+                          ...editContext,
+                          baseYaml: rawYaml,
                           name: newVolName.trim(),
                           driver: newVolDriver.trim() || 'local',
                         });
-                        setNewVolName('');
                       }}
                     />
                   </div>
@@ -1077,7 +1340,8 @@ export const ComposePage: React.FC = () => {
                         <SmallActionButton
                           label={t.common.remove}
                           danger
-                          onClick={() => postMessage('compose:volume:remove', { name })}
+                          disabled={otherVisualEditsBlocked}
+                          onClick={() => postMessage('compose:volume:remove', { ...editContext, baseYaml: rawYaml, name })}
                         />
                       </div>
                     ))}
@@ -1089,6 +1353,30 @@ export const ComposePage: React.FC = () => {
             {/* TAB 6: RAW YAML */}
             {tab === 'yaml' && (
               <div className="space-y-3 h-full flex flex-col">
+                {composeParseError && (
+                  <div role="alert" className="bg-red-500/10 border border-accent-red rounded-md px-4 py-2.5 text-xs text-accent-red">
+                    {extra.invalidYaml} {composeParseError}
+                  </div>
+                )}
+                {yamlConflict && (
+                  <div role="alert" className="bg-yellow-500/10 border border-accent-orange rounded-md px-4 py-2.5 text-xs text-accent-orange">
+                    {extra.draftConflict}
+                    <details className="mt-2 text-text-primary">
+                      <summary className="cursor-pointer">{extra.compareDraft}</summary>
+                      <div className="grid grid-cols-2 gap-3 mt-2">
+                        <div>
+                          <div className="font-semibold mb-1">{extra.currentFile}</div>
+                          <pre className="bg-panel-bg border border-panel-border p-2 overflow-auto max-h-64 whitespace-pre-wrap break-all">{rawYaml}</pre>
+                        </div>
+                        <div>
+                          <div className="font-semibold mb-1">{extra.yourDraft}</div>
+                          <pre className="bg-panel-bg border border-panel-border p-2 overflow-auto max-h-64 whitespace-pre-wrap break-all">{yamlDraft}</pre>
+                        </div>
+                      </div>
+                    </details>
+                  </div>
+                )}
+                {serviceDraft && <p className="text-xs text-accent-orange">{extra.finishServiceEdit}</p>}
                 {stackHasActiveContainers && (
                   <div className="bg-yellow-500/10 border border-accent-orange rounded-md px-4 py-2.5 text-xs text-accent-orange flex items-center justify-between gap-3">
                     <span className="flex items-center gap-2">
@@ -1097,7 +1385,8 @@ export const ComposePage: React.FC = () => {
                     </span>
                     <SmallActionButton
                       label={t.compose.stopStackNow}
-                      onClick={() => postMessage('stack:stop', {})}
+                      disabled={busy || !projectReady}
+                      onClick={() => postMessage('stack:stop', actionContext)}
                     />
                   </div>
                 )}
@@ -1106,16 +1395,24 @@ export const ComposePage: React.FC = () => {
                   <span className="text-xs font-mono text-text-secondary">{activeFile}</span>
                   <div className="flex items-center gap-2">
                     <SmallActionButton
-                      label={t.compose.restoreOriginal}
-                      disabled={yamlDraft === rawYaml}
-                      onClick={() => setYamlDraft(rawYaml)}
+                      label={yamlConflict ? extra.reloadDraft : t.compose.restoreOriginal}
+                      disabled={savingYaml || (!yamlDirty && yamlDraft === rawYaml)}
+                      onClick={() => setComposeDraft(activeFile, { base: rawYaml, text: rawYaml })}
                     />
                     <ActionPillButton
                       label={t.compose.saveYamlBtn}
                       variant="podman"
-                      disabled={stackHasActiveContainers || yamlDraft === rawYaml}
+                      loading={savingYaml}
+                      loadingLabel={extra.savingYaml}
+                      disabled={stackHasActiveContainers || !yamlDirty || yamlConflict || !projectReady || busy ||
+                        Boolean(serviceDraft)}
                       icon={<Save className="w-3.5 h-3.5" />}
-                      onClick={() => postMessage('compose:raw:save', { rawYaml: yamlDraft })}
+                      onClick={() => {
+                        const base = draft?.base ?? rawYaml;
+                        postMessage('compose:raw:save', {
+                          ...editContext, baseYaml: base, rawYaml: yamlDraft,
+                        }, newEditRequest('raw', '', base, yamlDraft));
+                      }}
                     />
                   </div>
                 </div>
@@ -1123,7 +1420,9 @@ export const ComposePage: React.FC = () => {
                 <textarea
                   value={yamlDraft}
                   readOnly={stackHasActiveContainers}
-                  onChange={(e) => setYamlDraft(e.target.value)}
+                  onChange={(e) => setComposeDraft(activeFile, {
+                    base: draft?.base ?? rawYaml, text: e.target.value,
+                  })}
                   className={`input-field font-mono text-xs leading-5 min-h-[460px] flex-1 ${
                     stackHasActiveContainers ? 'opacity-75 cursor-not-allowed' : ''
                   }`}
@@ -1153,6 +1452,18 @@ export const ComposePage: React.FC = () => {
                   </div>
 
                   <div className="flex items-center gap-2">
+                    <label className="text-xs text-text-secondary" htmlFor="compose-log-replica">{extra.logReplica}</label>
+                    <select id="compose-log-replica" value={selectedLogContainer}
+                      onChange={(event) => {
+                        setSelectedLogContainer(event.target.value);
+                        setLogPaused(false);
+                      }}
+                      className="input-field w-48 py-1 text-xs">
+                      <option value="">{extra.allReplicas}</option>
+                      {composeContainers.filter((item) => item.service === selectedLogService && item.fullId).map((item) => (
+                        <option key={item.fullId} value={item.fullId}>{item.name || item.id}</option>
+                      ))}
+                    </select>
                     <input
                       type="text"
                       value={logFilter}
@@ -1160,17 +1471,30 @@ export const ComposePage: React.FC = () => {
                       placeholder={t.compose.filterLinesPlaceholder}
                       className="input-field w-56 py-1 text-xs"
                     />
-                    <SmallActionButton label={t.common.clear} onClick={clearLogs} />
+                    <SmallActionButton label={t.common.clear} onClick={() => {
+                      postMessage('logs:clear', {
+                        ...actionContext, service: selectedLogService,
+                        containerId: selectedLogContainer || undefined,
+                      });
+                      clearLogs();
+                      setPausedLogEntries([]);
+                    }} />
                     {selectedLogService && (
                       <SmallActionButton
                         label={logPaused ? t.common.resume : t.common.pause}
-                        onClick={() => setLogPaused((paused) => !paused)}
+                        onClick={() => {
+                          if (!logPaused) setPausedLogEntries([...logEntries]);
+                          setLogPaused((paused) => !paused);
+                        }}
                       />
                     )}
                   </div>
                 </div>
-
-                <LogViewer entries={logEntries} filter={logFilter} />
+                {logPaused && <p role="status" className="text-xs text-text-secondary">{extra.pausedLogsHint}</p>}
+                {logEntries.some((entry) => !entry.sourceTimestamp) && (
+                  <p role="status" className="text-xs text-accent-orange">{extra.logReplayLimited}</p>
+                )}
+                <LogViewer entries={logPaused ? pausedLogEntries : logEntries} filter={logFilter} />
               </div>
             )}
 
@@ -1202,16 +1526,29 @@ export const ComposePage: React.FC = () => {
                   </div>
                   <div>
                     <label className="block text-xs text-text-secondary mb-1">
+                      {extra.builderSource}
+                    </label>
+                    <select value={bSource} onChange={(e) => setBSource(e.target.value as 'image' | 'build')}
+                      className="input-field">
+                      <option value="image">{extra.builderImageSource}</option>
+                      <option value="build">{extra.builderBuildSource}</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-text-secondary mb-1">
                       {t.compose.ociImageLabel}
                     </label>
                     <input
                       type="text"
-                      value={bImage}
-                      onChange={(e) => setBImage(e.target.value)}
-                      placeholder="docker.io/library/redis:7-alpine"
+                      value={bSource === 'build' ? bBuildImage : bImage}
+                      onChange={(e) => bSource === 'build' ? setBBuildImage(e.target.value) : setBImage(e.target.value)}
+                      placeholder={bSource === 'build' ? extra.optionalBuildImage : 'docker.io/library/redis:7-alpine'}
                       className="input-field font-mono"
                     />
                   </div>
+                </div>
+
+                <div className="grid grid-cols-3 gap-3">
                   <div>
                     <label className="block text-xs text-text-secondary mb-1">
                       {t.compose.detailRestartPolicy}
@@ -1227,7 +1564,32 @@ export const ComposePage: React.FC = () => {
                       <option value="no">no</option>
                     </select>
                   </div>
+                  <div>
+                    <label className="block text-xs text-text-secondary mb-1">{extra.builderContainerName}</label>
+                    <input type="text" value={bContainerName} onChange={(e) => setBContainerName(e.target.value)}
+                      className="input-field font-mono" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-text-secondary mb-1">{extra.builderCommand}</label>
+                    <input type="text" value={bCommand} onChange={(e) => setBCommand(e.target.value)}
+                      className="input-field font-mono" />
+                  </div>
                 </div>
+
+                {bSource === 'build' && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs text-text-secondary mb-1">{extra.visualBuildContext}</label>
+                      <input type="text" value={bBuildContext} onChange={(e) => setBBuildContext(e.target.value)}
+                        className="input-field font-mono" />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-text-secondary mb-1">{extra.visualDockerfile}</label>
+                      <input type="text" value={bDockerfile} onChange={(e) => setBDockerfile(e.target.value)}
+                        className="input-field font-mono" />
+                    </div>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-2 gap-3">
                   <div>
@@ -1278,14 +1640,24 @@ export const ComposePage: React.FC = () => {
                       placeholder="redis-data:/data"
                       className="input-field min-h-24 font-mono text-xs"
                     />
+                    <p className="text-xs text-text-secondary mt-1">{extra.builderVolumeHint}</p>
                   </div>
                 </div>
 
+                {bName.trim() && builderErrors.length > 0 && (
+                  <div role="alert" className="text-xs text-accent-orange">
+                    <p>{extra.builderValidation}</p>
+                    {builderErrors.map((error, index) => <p key={`${index}-${error}`}>{error}</p>)}
+                  </div>
+                )}
+                {serviceDraft && <p className="text-xs text-accent-orange">{extra.finishServiceEdit}</p>}
                 <div className="flex justify-end pt-2">
                   <ActionPillButton
                     label={t.compose.addServiceBtn}
                     variant="podman"
-                    disabled={!bName.trim()}
+                    loading={savingBuilder}
+                    loadingLabel={extra.savingService}
+                    disabled={builderErrors.length > 0 || visualEditingBlocked || Boolean(serviceDraft)}
                     icon={<Plus className="w-3.5 h-3.5" />}
                     onClick={handleBuilderAdd}
                   />
@@ -1298,6 +1670,16 @@ export const ComposePage: React.FC = () => {
 
       {/* Create Compose Wizard Modal */}
       {showCreateModal && <CreateComposeModal onClose={() => setShowCreateModal(false)} />}
+      {showProjectOptions && activeFile && composeProject.options && (
+        <ComposeOptionsModal
+          file={activeFile}
+          rawYaml={rawYaml}
+          revision={composeProject.revision}
+          options={composeProject.options}
+          busy={busy}
+          onClose={() => setShowProjectOptions(false)}
+        />
+      )}
 
       {scaleTarget && engine === 'podman' && activeFile && (
         <Modal
@@ -1319,6 +1701,7 @@ export const ComposePage: React.FC = () => {
                     return;
                   }
                   postMessage('stack:scale', {
+                    ...actionContext,
                     service: scaleTarget,
                     replicas: desiredScaleReplicas,
                   });
@@ -1365,7 +1748,9 @@ export const ComposePage: React.FC = () => {
                 label={t.common.remove}
                 variant="danger"
                 onClick={() => {
-                  postMessage('service:remove', { name: removeServiceTarget });
+                  postMessage('service:remove', {
+                    ...editContext, baseYaml: rawYaml, name: removeServiceTarget,
+                  });
                   setRemoveServiceTarget(null);
                 }}
               />

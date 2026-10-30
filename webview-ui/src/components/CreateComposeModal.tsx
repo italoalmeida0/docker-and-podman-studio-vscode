@@ -1,15 +1,78 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { FolderOpen, HeartPulse, Plus, Search, Trash2 } from 'lucide-react';
+import {
+  ComposeBuilderSpec,
+  serializeComposeBuilder,
+  validateComposeBuilder,
+} from '../../../src/shared/composeBuilder';
 import { useI18n } from '../i18n';
+import { useComposeExtras } from '../i18n/composeExtras';
 import { useStudioStore } from '../store';
 import { useVsCodeMessaging } from '../vscode';
 import { ActionPillButton, Modal, SmallActionButton } from './Shared';
+
+interface WizardService {
+  id: number;
+  serviceName: string;
+  containerName: string;
+  serviceSource: 'image' | 'build';
+  image: string;
+  buildImage: string;
+  buildContext: string;
+  buildDockerfile: string;
+  ports: string[];
+  restartPolicy: string;
+  includeNetwork: boolean;
+  networkName: string;
+  includeVolume: boolean;
+  volumeName: string;
+  volumesText: string;
+  environmentText: string;
+  dependsText: string;
+  commandText: string;
+  hcEnabled: boolean;
+  hcTest: string;
+  hcInterval: string;
+  hcTimeout: string;
+  hcRetries: string;
+  hcStartPeriod: string;
+}
+
+function initialService(id: number, dockerfile: string, network = 'app-net'): WizardService {
+  return {
+    id,
+    serviceName: id === 1 ? 'app' : `service${id}`,
+    containerName: '',
+    serviceSource: 'image',
+    image: id === 1 ? 'docker.io/library/nginx:alpine' : 'docker.io/library/alpine:latest',
+    buildImage: '',
+    buildContext: '.',
+    buildDockerfile: dockerfile,
+    ports: id === 1 ? ['8080:80'] : [],
+    restartPolicy: 'unless-stopped',
+    includeNetwork: Boolean(network),
+    networkName: network || 'app-net',
+    includeVolume: false,
+    volumeName: 'app-data',
+    volumesText: '',
+    environmentText: '',
+    dependsText: '',
+    commandText: '',
+    hcEnabled: false,
+    hcTest: 'curl -f http://localhost/ || exit 1',
+    hcInterval: '30s',
+    hcTimeout: '5s',
+    hcRetries: '3',
+    hcStartPeriod: '10s',
+  };
+}
 
 export const CreateComposeModal: React.FC<{
   onClose: () => void;
 }> = ({ onClose }) => {
   const { t, fmt, engine, engineLabel } = useI18n();
-  const { postMessage } = useVsCodeMessaging();
+  const extra = useComposeExtras();
+  const { postMessage, onMessage } = useVsCodeMessaging();
   const {
     selectedDirectory, imageResults, setImageResults, imageSearchError,
     setImageSearchError, operationsInProgress,
@@ -22,36 +85,54 @@ export const CreateComposeModal: React.FC<{
   const [directory, setDirectory] = useState('.');
   const [fileName, setFileName] = useState(defaultComposeFile);
   const [includeSampleService, setIncludeSampleService] = useState(true);
-  const [serviceName, setServiceName] = useState('app');
-  const [containerName, setContainerName] = useState('');
-  const [serviceSource, setServiceSource] = useState<'image' | 'build'>('image');
+  const [services, setServices] = useState<WizardService[]>(() => [initialService(1, defaultDockerfile)]);
+  const [activeServiceId, setActiveServiceId] = useState(1);
+  const [creating, setCreating] = useState(false);
+  const [confirmRemoveService, setConfirmRemoveService] = useState(false);
+  const pendingCreation = useRef<string | null>(null);
   const [registryType, setRegistryType] = useState<'configured' | 'quay' | 'dockerhub' | 'custom'>(
     engine === 'podman' ? 'quay' : 'dockerhub'
   );
   const [registryUrl, setRegistryUrl] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
-  const [image, setImage] = useState('docker.io/library/nginx:alpine');
-  const [buildContext, setBuildContext] = useState('.');
-  const [buildDockerfile, setBuildDockerfile] = useState(defaultDockerfile);
-  const [ports, setPorts] = useState<string[]>(['8080:80']);
-  const [restartPolicy, setRestartPolicy] = useState('unless-stopped');
-  const [includeNetwork, setIncludeNetwork] = useState(true);
-  const [networkName, setNetworkName] = useState('app-net');
-  const [includeVolume, setIncludeVolume] = useState(false);
-  const [volumeName, setVolumeName] = useState('app-data');
-  const [volumesText, setVolumesText] = useState('');
-  const [environmentText, setEnvironmentText] = useState('');
-  const [dependsText, setDependsText] = useState('');
-  const [commandText, setCommandText] = useState('');
-
-  // Healthcheck sub-modal
   const [showHcModal, setShowHcModal] = useState(false);
-  const [hcEnabled, setHcEnabled] = useState(false);
-  const [hcTest, setHcTest] = useState('curl -f http://localhost/ || exit 1');
-  const [hcInterval, setHcInterval] = useState('30s');
-  const [hcTimeout, setHcTimeout] = useState('5s');
-  const [hcRetries, setHcRetries] = useState('3');
-  const [hcStartPeriod, setHcStartPeriod] = useState('10s');
+  const activeService = services.find((service) => service.id === activeServiceId) || services[0];
+  const updateService = (changes: Partial<WizardService>) =>
+    setServices((previous) => previous.map((service) =>
+      service.id === activeServiceId ? { ...service, ...changes } : service
+    ));
+  const {
+    serviceName, containerName, serviceSource, buildContext, buildDockerfile, ports,
+    restartPolicy, includeNetwork, networkName, includeVolume, volumeName,
+    volumesText, environmentText, dependsText, commandText, hcEnabled, hcTest,
+    hcInterval, hcTimeout, hcRetries, hcStartPeriod,
+  } = activeService;
+  const image = serviceSource === 'build' ? activeService.buildImage : activeService.image;
+  const setServiceName = (value: string) => updateService({ serviceName: value });
+  const setContainerName = (value: string) => updateService({ containerName: value });
+  const setServiceSource = (value: 'image' | 'build') => updateService({ serviceSource: value });
+  const setImage = (value: string) => updateService(serviceSource === 'build' ? { buildImage: value } : { image: value });
+  const setBuildContext = (value: string) => updateService({ buildContext: value });
+  const setBuildDockerfile = (value: string) => updateService({ buildDockerfile: value });
+  const setPorts = (value: React.SetStateAction<string[]>) =>
+    setServices((previous) => previous.map((service) => service.id === activeServiceId
+      ? { ...service, ports: typeof value === 'function' ? value(service.ports) : value }
+      : service));
+  const setRestartPolicy = (value: string) => updateService({ restartPolicy: value });
+  const setIncludeNetwork = (value: boolean) => updateService({ includeNetwork: value });
+  const setNetworkName = (value: string) => updateService({ networkName: value });
+  const setIncludeVolume = (value: boolean) => updateService({ includeVolume: value });
+  const setVolumeName = (value: string) => updateService({ volumeName: value });
+  const setVolumesText = (value: string) => updateService({ volumesText: value });
+  const setEnvironmentText = (value: string) => updateService({ environmentText: value });
+  const setDependsText = (value: string) => updateService({ dependsText: value });
+  const setCommandText = (value: string) => updateService({ commandText: value });
+  const setHcEnabled = (value: boolean) => updateService({ hcEnabled: value });
+  const setHcTest = (value: string) => updateService({ hcTest: value });
+  const setHcInterval = (value: string) => updateService({ hcInterval: value });
+  const setHcTimeout = (value: string) => updateService({ hcTimeout: value });
+  const setHcRetries = (value: string) => updateService({ hcRetries: value });
+  const setHcStartPeriod = (value: string) => updateService({ hcStartPeriod: value });
 
   const searchRegistry = () => {
     if (searching) return;
@@ -72,108 +153,65 @@ export const CreateComposeModal: React.FC<{
     }
   }, [selectedDirectory]);
 
-  const previewYaml = useMemo(() => {
-    const lines: string[] = ['services:'];
-    if (!includeSampleService) {
-      lines.push('  {}');
-      return lines.join('\n');
-    }
-    const svc = serviceName.trim() || 'app';
-    lines.push(`  ${svc}:`);
-    if (serviceSource === 'build') {
-      lines.push('    build:');
-      lines.push(`      context: ${buildContext.trim() || '.'}`);
-      lines.push(`      dockerfile: ${buildDockerfile.trim() || 'Containerfile'}`);
-      if (image.trim()) {
-        lines.push(`    image: ${image.trim()}`);
+  useEffect(() => onMessage((message) => {
+    if (!message.requestId || message.requestId !== pendingCreation.current) return;
+    if (message.command === 'compose:create:saved' || message.command === 'compose:create:failed') {
+      pendingCreation.current = null;
+      setCreating(false);
+      if (message.command === 'compose:create:saved') {
+        setImageResults([]);
+        onClose();
       }
-    } else {
-      lines.push(`    image: ${image.trim() || 'docker.io/library/nginx:alpine'}`);
     }
-    if (containerName.trim()) {
-      lines.push(`    container_name: ${containerName.trim()}`);
-    }
-    const validPorts = ports.map((p) => p.trim()).filter(Boolean);
-    if (validPorts.length > 0) {
-      lines.push('    ports:');
-      validPorts.forEach((p) => lines.push(`      - "${p}"`));
-    }
-    if (restartPolicy) {
-      lines.push(`    restart: ${restartPolicy}`);
-    }
-    if (includeNetwork && networkName.trim()) {
-      lines.push('    networks:');
-      lines.push(`      - ${networkName.trim()}`);
-    }
-    if (includeVolume && volumeName.trim()) {
-      lines.push('    volumes:');
-      lines.push(`      - ${volumeName.trim()}:/data`);
-    }
-    if (hcEnabled && hcTest.trim()) {
-      lines.push('    healthcheck:');
-      lines.push(`      test: ["CMD-SHELL", "${hcTest.trim()}"]`);
-      lines.push(`      interval: ${hcInterval || '30s'}`);
-    }
-    if (includeNetwork && networkName.trim()) {
-      lines.push('', 'networks:', `  ${networkName.trim()}:`, '    driver: bridge');
-    }
-    if (includeVolume && volumeName.trim()) {
-      lines.push('', 'volumes:', `  ${volumeName.trim()}: {}`);
-    }
-    return lines.join('\n');
-  }, [
-    includeSampleService,
-    serviceName,
-    serviceSource,
-    buildContext,
-    buildDockerfile,
-    image,
-    containerName,
-    ports,
-    restartPolicy,
-    includeNetwork,
-    networkName,
-    includeVolume,
-    volumeName,
-    hcEnabled,
-    hcTest,
-    hcInterval,
-  ]);
+  }), [onMessage, onClose, setImageResults]);
+
+  const spec = useMemo<ComposeBuilderSpec>(() => ({
+    services: includeSampleService ? services.map((service) => ({
+      name: service.serviceName,
+      containerName: service.containerName,
+      source: service.serviceSource,
+      image: service.serviceSource === 'build' ? service.buildImage : service.image,
+      buildContext: service.buildContext,
+      buildDockerfile: service.buildDockerfile,
+      ports: service.ports,
+      restartPolicy: service.restartPolicy,
+      networkName: service.includeNetwork ? service.networkName : '',
+      volumeName: service.includeVolume ? service.volumeName : '',
+      volumesText: service.volumesText,
+      environmentText: service.environmentText,
+      dependsText: service.dependsText,
+      commandText: service.commandText,
+      healthcheck: service.hcEnabled ? {
+        test: service.hcTest,
+        interval: service.hcInterval,
+        timeout: service.hcTimeout,
+        retries: service.hcRetries,
+        startPeriod: service.hcStartPeriod,
+      } : undefined,
+    })) : [],
+  }), [includeSampleService, services]);
+  const validation = useMemo(() => [
+    ...validateComposeBuilder(spec),
+    ...(includeSampleService && services.some((service) =>
+      (service.includeNetwork && !service.networkName.trim()) ||
+      (service.includeVolume && !service.volumeName.trim())
+    ) ? [extra.wizardResourceName] : []),
+  ], [extra.wizardResourceName, includeSampleService, services, spec]);
+  const previewYaml = useMemo(
+    () => validation.length === 0 ? serializeComposeBuilder(spec) : '',
+    [spec, validation]
+  );
 
   const handleCreate = () => {
+    if (creating || validation.length > 0) return;
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    pendingCreation.current = requestId;
+    setCreating(true);
     postMessage('compose:file:create', {
       directory,
       fileName,
-      includeSampleService,
-      serviceName,
-      containerName,
-      serviceSource,
-      image,
-      buildContext,
-      buildDockerfile,
-      ports,
-      restartPolicy,
-      includeNetwork,
-      networkName,
-      includeVolume,
-      volumeName,
-      volumesText,
-      environmentText,
-      dependsText,
-      commandText,
-      healthcheck:
-        hcEnabled && hcTest.trim()
-          ? {
-              test: hcTest,
-              interval: hcInterval,
-              timeout: hcTimeout,
-              retries: hcRetries,
-              startPeriod: hcStartPeriod,
-            }
-          : undefined,
-    });
-    setImageResults([]);
-    onClose();
+      spec,
+    }, requestId);
   };
 
   return (
@@ -182,12 +220,15 @@ export const CreateComposeModal: React.FC<{
         title={fmt(t.wizard.title, { engine: engineLabel })}
         subtitle={t.wizard.subtitle}
         maxWidth="max-w-5xl"
-        onClose={onClose}
+        onClose={() => { if (!creating) onClose(); }}
         footer={
           <>
-            <ActionPillButton label={t.common.cancel} onClick={onClose} />
+            <ActionPillButton label={t.common.cancel} disabled={creating} onClick={onClose} />
             <ActionPillButton
               label={t.wizard.createBtn}
+              loading={creating}
+              loadingLabel={extra.creatingFile}
+              disabled={validation.length > 0 || !directory.trim() || !fileName.trim()}
               variant="podman"
               onClick={handleCreate}
             />
@@ -239,26 +280,75 @@ export const CreateComposeModal: React.FC<{
                 />
                 {t.wizard.includeInitialService}
               </label>
-              <label className="flex items-center gap-2 text-xs text-text-primary cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={includeNetwork}
-                  onChange={(e) => setIncludeNetwork(e.target.checked)}
-                />
-                {t.wizard.createDedicatedNetwork}
-              </label>
-              <label className="flex items-center gap-2 text-xs text-text-primary cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={includeVolume}
-                  onChange={(e) => setIncludeVolume(e.target.checked)}
-                />
-                {t.wizard.createPersistentVolume}
-              </label>
+              {includeSampleService && (
+                <>
+                  <label className="flex items-center gap-2 text-xs text-text-primary cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={includeNetwork}
+                      onChange={(e) => setIncludeNetwork(e.target.checked)}
+                    />
+                    {t.wizard.createDedicatedNetwork}
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-text-primary cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={includeVolume}
+                      onChange={(e) => setIncludeVolume(e.target.checked)}
+                    />
+                    {t.wizard.createPersistentVolume}
+                  </label>
+                </>
+              )}
             </div>
 
             {includeSampleService && (
               <div className="space-y-3 border-t border-panel-border pt-3">
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <span className="text-xs font-semibold text-text-primary">{extra.servicesInWizard}</span>
+                    <div className="flex gap-2">
+                      <SmallActionButton
+                        label={extra.addAnotherService}
+                        icon={<Plus className="w-3 h-3" />}
+                        onClick={() => {
+                          let id = Math.max(...services.map((service) => service.id)) + 1;
+                          while (services.some((service) => service.serviceName.trim() === `service${id}`)) id++;
+                          const next = initialService(
+                            id, defaultDockerfile, includeNetwork ? networkName.trim() : ''
+                          );
+                          setServices((previous) => [...previous, next]);
+                          setActiveServiceId(id);
+                        }}
+                      />
+                      <SmallActionButton
+                        label={extra.removeCurrentService}
+                        danger
+                        disabled={services.length <= 1}
+                        icon={<Trash2 className="w-3 h-3" />}
+                        onClick={() => setConfirmRemoveService(true)}
+                      />
+                    </div>
+                  </div>
+                  <div className="flex gap-1.5 flex-wrap">
+                    {services.map((service) => (
+                      <button
+                        key={service.id}
+                        type="button"
+                        aria-pressed={service.id === activeServiceId}
+                        onClick={() => setActiveServiceId(service.id)}
+                        className={`px-3 py-1 text-xs rounded-lg border font-mono ${
+                          service.id === activeServiceId
+                            ? 'bg-accent-purple text-white border-accent-purple'
+                            : 'bg-panel-bg border-panel-border text-text-secondary'
+                        }`}
+                      >
+                        {service.serviceName || `service${service.id}`}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-text-secondary">{extra.wizardNetworkHint}</p>
+                </div>
                 <div className="grid grid-cols-3 gap-3">
                   <div>
                     <label className="block text-xs text-text-secondary mb-1">
@@ -586,12 +676,48 @@ export const CreateComposeModal: React.FC<{
                 {fileName || 'podman-compose.yml'}
               </span>
             </div>
-            <pre className="flex-1 overflow-auto font-mono text-xs text-text-primary whitespace-pre-wrap leading-5">
-              {previewYaml}
-            </pre>
+            {validation.length > 0 ? (
+              <div role="alert" className="text-xs text-accent-orange space-y-2">
+                <p>{extra.wizardValidation}</p>
+                <ul className="list-disc pl-4 space-y-1">
+                  {validation.map((error, index) => <li key={`${error}-${index}`}>{error}</li>)}
+                </ul>
+                <p>{extra.wizardPreviewUnavailable}</p>
+              </div>
+            ) : (
+              <pre className="flex-1 overflow-auto font-mono text-xs text-text-primary whitespace-pre-wrap leading-5">
+                {previewYaml}
+              </pre>
+            )}
           </div>
         </div>
       </Modal>
+
+      {confirmRemoveService && (
+        <Modal
+          title={extra.removeWizardTitle}
+          onClose={() => setConfirmRemoveService(false)}
+          footer={(
+            <>
+              <ActionPillButton label={t.common.cancel} onClick={() => setConfirmRemoveService(false)} />
+              <ActionPillButton
+                label={t.common.remove}
+                variant="danger"
+                onClick={() => {
+                  const remaining = services.filter((service) => service.id !== activeServiceId);
+                  setServices(remaining);
+                  setActiveServiceId(remaining[0].id);
+                  setConfirmRemoveService(false);
+                }}
+              />
+            </>
+          )}
+        >
+          <p className="text-sm text-text-secondary">
+            {fmt(extra.removeWizardDetail, { name: serviceName })}
+          </p>
+        </Modal>
+      )}
 
       {/* Healthcheck Modal */}
       {showHcModal && (

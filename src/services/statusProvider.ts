@@ -82,6 +82,7 @@ export class StatusProvider implements vscode.Disposable {
     try {
       let doc: ComposeDocument | undefined;
       const content = fs.readFileSync(file, 'utf-8');
+      const revision = this.podman.getComposeProjectRevision(file);
       try {
         doc = this.yaml.parse(content);
       } catch {
@@ -94,6 +95,10 @@ export class StatusProvider implements vscode.Disposable {
       if (!fs.existsSync(file)) {
         throw new Error(`Compose file is unavailable: ${file}`);
       }
+      if (this.podman.getComposeProjectRevision(file) !== revision) {
+        this.clearContainers();
+        return this.containers;
+      }
       this.lastError = '';
       const changed = JSON.stringify(next) !== JSON.stringify(this.containers);
       this.containers = next;
@@ -103,7 +108,15 @@ export class StatusProvider implements vscode.Disposable {
     } catch (error) {
       if (generation === this.generation) {
         const unavailable = !fs.existsSync(file);
-        if (unavailable) {
+        let projectUnavailable = unavailable;
+        if (!projectUnavailable) {
+          try {
+            this.podman.getComposeProjectRevision(file);
+          } catch {
+            projectUnavailable = true;
+          }
+        }
+        if (projectUnavailable) {
           this.clearContainers();
         }
         const message = unavailable

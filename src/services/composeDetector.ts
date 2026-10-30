@@ -22,6 +22,21 @@ export function isComposeFileName(filePath: string): boolean {
   );
 }
 
+export function mergeComposeFileList(
+  files: string[],
+  activeFile?: string,
+  caseInsensitive = process.platform === 'win32'
+): string[] {
+  const merged = new Map<string, string>();
+  const keyFor = (file: string) => {
+    const normalized = path.normalize(file);
+    return caseInsensitive ? normalized.toLowerCase() : normalized;
+  };
+  for (const file of files) merged.set(keyFor(file), file);
+  if (activeFile) merged.set(keyFor(activeFile), activeFile);
+  return [...merged.values()].sort();
+}
+
 export class ComposeFileDetector implements vscode.Disposable {
   private files: string[] = [];
   private watcher: vscode.FileSystemWatcher | undefined;

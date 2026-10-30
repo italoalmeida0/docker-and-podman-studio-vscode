@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { create } from 'zustand';
+import { ComposeDraft, ComposeServiceDraft, syncComposeDraft } from './composeDrafts';
 import { createEngineMessageGate, StudioMessage, useVsCodeMessaging } from './vscode';
 
 export type ContainerEngine = 'docker' | 'podman';
@@ -135,6 +136,8 @@ export interface PodmanContainer {
   imageId: string;
   status: string;
   state: ServiceStatus;
+  health?: string;
+  exitCode?: number;
   ports: string;
   portMappings: PortMapping[];
   created: string;
@@ -263,11 +266,36 @@ export interface ComposeDocument {
   secrets?: Record<string, any>;
 }
 
+export interface ComposeProjectOptions {
+  files: string[];
+  profiles: string[];
+  envFile?: string;
+}
+
+interface ComposeProjectState {
+  options: ComposeProjectOptions | null;
+  revision: string | null;
+  error: string | null;
+  resolving: boolean;
+  customized: boolean;
+  dependenciesIncomplete: boolean;
+}
+
+interface PendingComposeEdit {
+  file: string;
+  kind: 'service' | 'builder' | 'raw';
+  name: string;
+  base: string;
+  snapshot?: string;
+}
+
 export interface LogEntry {
   service: string;
   timestamp: string;
   message: string;
   level: 'info' | 'warn' | 'error' | 'debug';
+  target?: string;
+  sourceTimestamp?: boolean;
 }
 
 export interface ImageSearchResult {
@@ -335,6 +363,12 @@ interface StudioState {
   document: ComposeDocument | null;
   activeFile: string | null;
   rawYaml: string;
+  composeParseError: string | null;
+  composeProject: ComposeProjectState;
+  serviceFragments: Record<string, string>;
+  composeDrafts: Record<string, ComposeDraft>;
+  composeServiceDrafts: Record<string, ComposeServiceDraft>;
+  pendingComposeEdits: Record<string, PendingComposeEdit>;
   composeFiles: string[];
   composeContainers: ComposeContainerStatus[];
   selectedDirectory: string | null;
@@ -373,8 +407,15 @@ interface StudioState {
   setComposeUpdate: (
     doc: ComposeDocument | null,
     activeFile: string | null,
-    rawYaml: string
+    rawYaml: string,
+    parseError: string | null,
+    serviceFragments: Record<string, string>,
+    project?: ComposeProjectState
   ) => void;
+  setComposeDraft: (file: string, draft: ComposeDraft) => void;
+  setComposeServiceDraft: (file: string, draft: ComposeServiceDraft | null) => void;
+  beginComposeEdit: (requestId: string, edit: PendingComposeEdit) => void;
+  finishComposeEdit: (requestId: string, savedFile?: string) => void;
   setComposeFiles: (files: string[]) => void;
   setComposeContainers: (containers: ComposeContainerStatus[]) => void;
   setSelectedDirectory: (dir: string | null) => void;
@@ -451,6 +492,12 @@ export const useStudioStore = create<StudioState>((set) => ({
   document: null,
   activeFile: null,
   rawYaml: '',
+  composeParseError: null,
+  composeProject: { options: null, revision: null, error: null, resolving: false, customized: false, dependenciesIncomplete: false },
+  serviceFragments: {},
+  composeDrafts: {},
+  composeServiceDrafts: {},
+  pendingComposeEdits: {},
   composeFiles: [],
   composeContainers: [],
   selectedDirectory: null,
@@ -480,7 +527,40 @@ export const useStudioStore = create<StudioState>((set) => ({
   settingsTestResult: null,
   banner: null,
 
-  setComposeUpdate: (document, activeFile, rawYaml) => set({ document, activeFile, rawYaml }),
+  setComposeUpdate: (document, activeFile, rawYaml, composeParseError, serviceFragments, project) =>
+    set((state) => ({
+      document, activeFile, rawYaml, composeParseError, serviceFragments,
+      composeProject: project ?? { options: null, revision: null, error: null, resolving: false, customized: false, dependenciesIncomplete: false },
+      composeDrafts: activeFile
+        ? { ...state.composeDrafts, [activeFile]: syncComposeDraft(state.composeDrafts[activeFile], rawYaml) }
+        : state.composeDrafts,
+    })),
+  setComposeDraft: (file, draft) =>
+    set((state) => ({ composeDrafts: { ...state.composeDrafts, [file]: draft } })),
+  setComposeServiceDraft: (file, draft) =>
+    set((state) => {
+      const composeServiceDrafts = { ...state.composeServiceDrafts };
+      if (draft) composeServiceDrafts[file] = draft;
+      else delete composeServiceDrafts[file];
+      return { composeServiceDrafts };
+    }),
+  beginComposeEdit: (requestId, edit) =>
+    set((state) => ({ pendingComposeEdits: { ...state.pendingComposeEdits, [requestId]: edit } })),
+  finishComposeEdit: (requestId, savedFile) =>
+    set((state) => {
+      const pending = state.pendingComposeEdits[requestId];
+      if (!pending) return state;
+      const pendingComposeEdits = { ...state.pendingComposeEdits };
+      delete pendingComposeEdits[requestId];
+      const composeServiceDrafts = { ...state.composeServiceDrafts };
+      const draft = composeServiceDrafts[pending.file];
+      if (savedFile === pending.file && pending.kind === 'service' && draft &&
+          draft.name === pending.name && draft.base === pending.base &&
+          JSON.stringify(draft) === pending.snapshot) {
+        delete composeServiceDrafts[pending.file];
+      }
+      return { pendingComposeEdits, composeServiceDrafts };
+    }),
   setComposeFiles: (composeFiles) => set({ composeFiles }),
   setComposeContainers: (composeContainers) => set({ composeContainers }),
   setSelectedDirectory: (selectedDirectory) => set({ selectedDirectory }),
@@ -545,7 +625,7 @@ export const useStudioStore = create<StudioState>((set) => ({
   setLogHistory: (logEntries) => set({ logEntries }),
   appendLogLine: (entry) =>
     set((state) => ({
-      logEntries: [...state.logEntries.slice(-1999), entry],
+      logEntries: [...state.logEntries, entry].slice(-Math.max(1, state.settings?.logBufferSize || 5000)),
     })),
   clearLogs: () => set({ logEntries: [] }),
   setLogFilter: (logFilter) => set({ logFilter }),
@@ -590,10 +670,28 @@ export function useStudioMessageBridge(): void {
       const p = msg.payload;
       switch (msg.command) {
         case 'compose:update':
-          store.setComposeUpdate(p?.document ?? null, p?.activeFile ?? null, p?.rawYaml ?? '');
+          store.setComposeUpdate(
+            p?.document ?? null, p?.activeFile ?? null, p?.rawYaml ?? '',
+            typeof p?.parseError === 'string' ? p.parseError : null,
+            p?.serviceFragments && typeof p.serviceFragments === 'object' ? p.serviceFragments : {},
+            {
+              options: p?.projectOptions ?? null,
+              revision: typeof p?.projectRevision === 'string' ? p.projectRevision : null,
+              error: typeof p?.projectError === 'string' ? p.projectError : null,
+              resolving: p?.projectResolving === true,
+              customized: p?.projectCustomized === true,
+              dependenciesIncomplete: p?.dependenciesIncomplete === true,
+            }
+          );
           break;
         case 'compose:files:update':
           store.setComposeFiles(Array.isArray(p) ? p : []);
+          break;
+        case 'compose:edit:saved':
+          if (msg.requestId) store.finishComposeEdit(msg.requestId, typeof p?.file === 'string' ? p.file : undefined);
+          break;
+        case 'compose:edit:failed':
+          if (msg.requestId) store.finishComposeEdit(msg.requestId);
           break;
         case 'containers:update':
           store.setComposeContainers(Array.isArray(p) ? p : []);
@@ -668,14 +766,15 @@ export function useStudioMessageBridge(): void {
           }
           break;
         case 'log:history':
-          if (Array.isArray(p)) {
+          if (Array.isArray(p) && !useStudioStore.getState().activeLogTarget) {
             store.setLogHistory(p);
-          } else if (Array.isArray(p?.entries)) {
+          } else if (Array.isArray(p?.entries) &&
+              (!p.target || p.target === useStudioStore.getState().activeLogTarget)) {
             store.setLogHistory(p.entries);
           }
           break;
         case 'log:line':
-          if (p) {
+          if (p && (!p.target || p.target === useStudioStore.getState().activeLogTarget)) {
             store.appendLogLine(p);
           }
           break;

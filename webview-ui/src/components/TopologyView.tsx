@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { groupComposeContainers, summarizeComposeService } from '../composeStatus';
+import { composeEnvFiles, composeMounts, serviceNetworks } from '../composeTopology';
 import { useI18n } from '../i18n';
+import { useComposeExtras } from '../i18n/composeExtras';
 import { ComposeContainerStatus, ComposeDocument } from '../store';
 import { getStatusTheme } from './Shared';
 
@@ -54,18 +56,23 @@ export const TopologyView: React.FC<{
   document: ComposeDocument;
   containers: ComposeContainerStatus[];
   busy: boolean;
+  startDisabled: boolean;
   onServiceAction: (action: 'start' | 'stop' | 'down' | 'restart', serviceName: string) => void;
   onOpenLogs: (serviceName: string) => void;
   onSelectService: (serviceName: string) => void;
+  onOpenResources: () => void;
 }> = ({
   document,
   containers,
   busy,
+  startDisabled,
   onServiceAction,
   onOpenLogs,
   onSelectService,
+  onOpenResources,
 }) => {
   const { t, fmt, engine } = useI18n();
+  const extra = useComposeExtras();
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const [positions, setPositions] = useState<Record<string, { x: number; y: number }>>({});
   const [dragging, setDragging] = useState<{
@@ -100,44 +107,37 @@ export const TopologyView: React.FC<{
     const declaredVols = new Set<string>(Object.keys(document.volumes || {}));
     const bindMap = new Map<string, NodeItem>();
     const envMap = new Map<string, NodeItem>();
+    const anonymousMap = new Map<string, NodeItem>();
 
     // Collect networks & volumes referenced by services
-    for (const [, svc] of services) {
-      for (const n of extractList(svc?.networks)) {
+    for (const [serviceName, svc] of services) {
+      for (const n of serviceNetworks(svc)) {
         declaredNets.add(n);
       }
-      for (const v of extractList(svc?.volumes)) {
-        const str = String(v);
-        const isWinBind = /^[a-zA-Z]:[\\/]/.test(str);
-        const colonIdx = str.indexOf(':', 2);
-        const parts =
-          isWinBind && colonIdx !== -1
-            ? [str.slice(0, colonIdx), str.slice(colonIdx + 1)]
-            : str.split(':');
-        const src = parts[0] || str;
-        const dst = parts[1] || '';
-        const isBind =
-          isWinBind ||
-          src.startsWith('.') ||
-          src.startsWith('/') ||
-          src.startsWith('~') ||
-          src.includes('\\');
-        if (isBind) {
-          const bindId = `bind:${src}`;
+      composeMounts(svc?.volumes).forEach((mount, index) => {
+        if (mount.kind === 'bind' && mount.source) {
+          const bindId = `bind:${mount.source}`;
           if (!bindMap.has(bindId)) {
             bindMap.set(bindId, {
               id: bindId,
               kind: 'bind',
-              title: src,
+              title: mount.source,
               subtitle: t.topology.bindMountHost,
-              meta: dst ? [fmt(t.topology.targetPrefix, { target: dst })] : [],
+              meta: [fmt(t.topology.targetPrefix, { target: mount.target })],
             });
           }
-        } else if (src) {
-          declaredVols.add(src);
+        } else if (mount.kind === 'volume' && mount.source) {
+          declaredVols.add(mount.source);
+        } else {
+          const id = `mount:${serviceName}:${index}`;
+          anonymousMap.set(id, {
+            id, kind: 'volume', title: mount.target,
+            subtitle: mount.kind === 'tmpfs' ? extra.tmpfsMount : extra.anonymousVolume,
+            meta: [serviceName],
+          });
         }
-      }
-      for (const ef of extractList(svc?.env_file)) {
+      });
+      for (const ef of composeEnvFiles(svc?.env_file)) {
         const envId = `env:${ef}`;
         if (!envMap.has(envId)) {
           envMap.set(envId, {
@@ -149,10 +149,6 @@ export const TopologyView: React.FC<{
           });
         }
       }
-    }
-
-    if (declaredNets.size === 0 && services.length > 0) {
-      declaredNets.add('default');
     }
 
     for (const netName of declaredNets) {
@@ -170,8 +166,7 @@ export const TopologyView: React.FC<{
       const summary = statusMap.get(svcName);
       const st = summary?.container;
       const ports = extractList(svc?.ports).slice(0, 2);
-      const svcNets = extractList(svc?.networks);
-      const targetNets = svcNets.length > 0 ? svcNets : ['default'];
+      const targetNets = serviceNetworks(svc);
 
       nodeList.push({
         id: `svc:${svcName}`,
@@ -202,36 +197,19 @@ export const TopologyView: React.FC<{
         }
       }
 
-      for (const v of extractList(svc?.volumes)) {
-        const str = String(v);
-        const isWinBind = /^[a-zA-Z]:[\\/]/.test(str);
-        const colonIdx = str.indexOf(':', 2);
-        const src =
-          isWinBind && colonIdx !== -1 ? str.slice(0, colonIdx) : str.split(':')[0];
-        const isBind =
-          isWinBind ||
-          src.startsWith('.') ||
-          src.startsWith('/') ||
-          src.startsWith('~') ||
-          src.includes('\\');
-        if (isBind) {
-          edgeList.push({
-            id: `e-bind-${svcName}-${src}`,
-            from: `svc:${svcName}`,
-            to: `bind:${src}`,
-            kind: 'bind',
-          });
-        } else if (src) {
-          edgeList.push({
-            id: `e-vol-${svcName}-${src}`,
-            from: `svc:${svcName}`,
-            to: `vol:${src}`,
-            kind: 'volume',
-          });
-        }
-      }
+      composeMounts(svc?.volumes).forEach((mount, index) => {
+        const target = mount.kind === 'bind' ? `bind:${mount.source}` :
+          mount.kind === 'volume' ? `vol:${mount.source}` : `mount:${svcName}:${index}`;
+        edgeList.push({
+          id: `e-mount-${svcName}-${index}`,
+          from: `svc:${svcName}`,
+          to: target,
+          kind: mount.kind === 'bind' ? 'bind' : 'volume',
+          label: mount.target,
+        });
+      });
 
-      for (const ef of extractList(svc?.env_file)) {
+      for (const ef of composeEnvFiles(svc?.env_file)) {
         edgeList.push({
           id: `e-env-${svcName}-${ef}`,
           from: `svc:${svcName}`,
@@ -269,6 +247,9 @@ export const TopologyView: React.FC<{
     for (const b of bindMap.values()) {
       nodeList.push(b);
     }
+    for (const mount of anonymousMap.values()) {
+      nodeList.push(mount);
+    }
     for (const e of envMap.values()) {
       nodeList.push(e);
     }
@@ -303,7 +284,7 @@ export const TopologyView: React.FC<{
       defaultPositions: pos,
       canvasHeight: maxRowsHeight,
     };
-  }, [document, statusMap, t, fmt]);
+  }, [document, statusMap, t, fmt, extra]);
 
   useEffect(() => {
     setPositions((prev) => {
@@ -560,6 +541,19 @@ export const TopologyView: React.FC<{
                     ))}
                   </div>
                 )}
+                {(node.kind === 'service' || node.kind === 'network' ||
+                  (node.kind === 'volume' && node.id.startsWith('vol:'))) && (
+                  <button type="button"
+                    onMouseDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      if (node.kind === 'service') onSelectService(node.title);
+                      else onOpenResources();
+                    }}
+                    className="mt-2 text-[10px] text-sky-400 hover:underline">
+                    {node.kind === 'service' ? t.compose.tabs.services : t.compose.tabs.resources}
+                  </button>
+                )}
               </div>
             );
           })}
@@ -576,7 +570,7 @@ export const TopologyView: React.FC<{
               </div>
               <button
                 type="button"
-                disabled={busy}
+                disabled={busy || startDisabled}
                 onClick={() => {
                   onServiceAction('start', contextMenu.serviceName);
                   setContextMenu(null);
@@ -598,7 +592,7 @@ export const TopologyView: React.FC<{
               </button>
               <button
                 type="button"
-                disabled={busy}
+                disabled={busy || startDisabled}
                 onClick={() => {
                   onServiceAction('restart', contextMenu.serviceName);
                   setContextMenu(null);

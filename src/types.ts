@@ -61,6 +61,8 @@ export interface PodmanContainer {
   imageId: string;
   status: string;
   state: ServiceStatus;
+  health?: string;
+  exitCode?: number;
   ports: string;
   portMappings: PortMapping[];
   created: string;
@@ -187,6 +189,13 @@ export interface ComposeDocument {
   volumes?: Record<string, any>;
   configs?: Record<string, any>;
   secrets?: Record<string, any>;
+  [key: string]: any;
+}
+
+export interface ComposeProjectOptions {
+  files: string[];
+  profiles: string[];
+  envFile?: string;
 }
 
 export interface LogEntry {
@@ -194,6 +203,8 @@ export interface LogEntry {
   timestamp: string;
   message: string;
   level: 'info' | 'warn' | 'error' | 'debug';
+  target?: string;
+  sourceTimestamp?: boolean;
 }
 
 export interface CommandResult {
@@ -317,10 +328,12 @@ export const InboundCommand = {
   STACK_DOWN: 'stack:down',
   STACK_RESTART: 'stack:restart',
   STACK_BUILD: 'stack:build',
+  STACK_BUILD_UP: 'stack:build:up',
   STACK_SCALE: 'stack:scale',
   STACK_SERVICES_BATCH: 'stack:services:batch',
   LOGS_START: 'logs:start',
   LOGS_STOP: 'logs:stop',
+  LOGS_CLEAR: 'logs:clear',
   SERVICE_ADD: 'service:add',
   SERVICE_UPDATE: 'service:update',
   SERVICE_REMOVE: 'service:remove',
@@ -337,6 +350,8 @@ export const InboundCommand = {
   COMPOSE_FILES_LIST: 'compose:files:list',
   COMPOSE_FILE_SELECT: 'compose:file:select',
   COMPOSE_FILE_PICK: 'compose:file:pick',
+  COMPOSE_OPTIONS_PICK: 'compose:options:pick',
+  COMPOSE_OPTIONS_SAVE: 'compose:options:save',
 
   // Settings & Links
   SETTINGS_GET: 'settings:get',
@@ -374,5 +389,12 @@ export const OutboundCommand = {
   COMPOSE_FILES_UPDATE: 'compose:files:update',
   COMPOSE_DIRECTORY_SELECTED: 'compose:directory:selected',
   COMPOSE_IMAGE_RESULTS: 'compose:image:results',
+  COMPOSE_EDIT_SAVED: 'compose:edit:saved',
+  COMPOSE_EDIT_FAILED: 'compose:edit:failed',
+  COMPOSE_CREATE_SAVED: 'compose:create:saved',
+  COMPOSE_CREATE_FAILED: 'compose:create:failed',
+  COMPOSE_OPTIONS_SELECTED: 'compose:options:selected',
+  COMPOSE_OPTIONS_SAVED: 'compose:options:saved',
+  COMPOSE_OPTIONS_FAILED: 'compose:options:failed',
   DOCKERFILE_SELECTED: 'image:dockerfile:selected',
 } as const;

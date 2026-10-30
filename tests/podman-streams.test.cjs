@@ -169,12 +169,120 @@ test('removes Compose ANSI colors before parsing log prefixes', (t) => {
   assert.equal(entry.message, 'ready');
 });
 
+test('extracts timestamps after a Compose prefix without replacing them with the current time', (t) => {
+  const provider = new LogProvider({});
+  t.after(() => provider.dispose());
+  const entry = provider.parseLine('app', 'app-1 | 2024-01-02T03:04:05.123456789Z started');
+  assert.equal(entry.timestamp, '2024-01-02T03:04:05.123456789Z');
+  assert.equal(entry.message, 'started');
+  const reverse = provider.parseLine('app', '2024-01-02T03:04:05Z app-1 | ready');
+  assert.equal(reverse.timestamp, '2024-01-02T03:04:05Z');
+  assert.equal(reverse.message, 'ready');
+});
+
+test('Compose log history stays scoped to its project and replica when streams restart', async (t) => {
+  const children = [fakeChild(), fakeChild()];
+  const calls = [];
+  const provider = new LogProvider({
+    streamComposeLogs: async (...args) => {
+      calls.push(args);
+      return [{ process: children[calls.length - 1] }];
+    },
+  });
+  t.after(() => provider.dispose());
+  await provider.startComposeStreaming('one.yaml', 'app', { key: 'project-one', containerId: 'replica' });
+  children[0].stdout.emit('data', Buffer.from('first\n'));
+  provider.stopStreaming('project-one');
+  await provider.startComposeStreaming('two.yaml', 'app', { key: 'project-two', tail: 0 });
+  children[1].stdout.emit('data', Buffer.from('second\n'));
+  assert.equal(provider.getHistory('project-one')[0].message, 'first');
+  assert.equal(provider.getHistory('project-one')[0].service, 'app');
+  assert.equal(provider.getHistory('project-one')[0].target, 'project-one');
+  assert.equal(provider.getHistory('project-two')[0].message, 'second');
+  assert.equal(calls[0][4], 'replica');
+  assert.equal(calls[1][2], 0);
+});
+
+test('Compose log streams replay missed timestamped lines without dropping identical new lines', async (t) => {
+  const children = [fakeChild(), fakeChild()];
+  const calls = [];
+  const provider = new LogProvider({
+    streamComposeLogs: async (...args) => {
+      calls.push(args);
+      return [{ process: children[calls.length - 1], containerName: 'app-1' }];
+    },
+  });
+  t.after(() => provider.dispose());
+  const received = [];
+  provider.onLogLine((entry) => received.push(entry));
+  await provider.startComposeStreaming('compose.yaml', 'app', { key: 'project' });
+  children[0].stdout.emit('data', Buffer.from([
+    '2024-01-02T03:04:05.123456789Z repeated',
+    '2024-01-02T03:04:05.123456789Z repeated',
+    '2024-01-02T03:04:06Z before-leaving',
+    '',
+  ].join('\n')));
+  provider.stopStreaming('project');
+  await provider.startComposeStreaming('compose.yaml', 'app', { key: 'project' });
+  assert.equal(calls[1][5], '2024-01-02T03:04:05.123Z');
+  children[1].stdout.emit('data', Buffer.from([
+    '2024-01-02T03:04:05.123456789Z repeated',
+    '2024-01-02T03:04:05.123456789Z repeated',
+    '2024-01-02T03:04:05.123456789Z repeated',
+    '2024-01-02T03:04:06Z before-leaving',
+    '2024-01-02T03:04:07Z while-away',
+    '',
+  ].join('\n')));
+  assert.deepEqual(received.map((entry) => entry.message), [
+    '[app-1] repeated', '[app-1] repeated', '[app-1] before-leaving',
+    '[app-1] repeated', '[app-1] while-away',
+  ]);
+  assert.equal(provider.getHistory('project').length, 5);
+});
+
+test('adding a replica replays existing logs without hiding the new replica', async (t) => {
+  const first = fakeChild();
+  const resumed = fakeChild();
+  const added = fakeChild();
+  let starts = 0;
+  const provider = new LogProvider({
+    streamComposeLogs: async () => ++starts === 1
+      ? [{ process: first, containerName: 'app-1' }]
+      : [{ process: resumed, containerName: 'app-1' }, { process: added, containerName: 'app-2' }],
+  });
+  t.after(() => provider.dispose());
+  const received = [];
+  provider.onLogLine((entry) => received.push(entry.message));
+  await provider.startComposeStreaming('compose.yaml', 'app', { key: 'project' });
+  first.stdout.emit('data', Buffer.from('2024-01-02T03:04:05Z ready\n'));
+  provider.stopStreaming('project');
+  await provider.startComposeStreaming('compose.yaml', 'app', { key: 'project' });
+  resumed.stdout.emit('data', Buffer.from('2024-01-02T03:04:05Z ready\n'));
+  added.stdout.emit('data', Buffer.from('2024-01-02T03:04:05Z ready\n'));
+  assert.deepEqual(received, ['[app-1] ready', '[app-2] ready']);
+});
+
+test('replica log subscriptions change only when their relevant targets or states change', () => {
+  const { composeLogReplicaSignature } = loadModule('src/shared/composeLogs.ts');
+  const first = { service: 'app', fullId: 'a', status: 'running' };
+  const second = { service: 'app', fullId: 'b', status: 'exited' };
+  const other = { service: 'worker', fullId: 'c', status: 'running' };
+  const all = composeLogReplicaSignature([first, second, other], 'app');
+  assert.equal(all, composeLogReplicaSignature([other, second, first], 'app'));
+  assert.notEqual(all, composeLogReplicaSignature([first, { ...second, status: 'running' }], 'app'));
+  assert.notEqual(all, composeLogReplicaSignature([first], 'app'));
+  const selected = composeLogReplicaSignature([first, second], 'app', 'a');
+  assert.equal(selected, composeLogReplicaSignature([first, { ...second, status: 'running' }], 'app', 'a'));
+  assert.notEqual(selected, composeLogReplicaSignature([{ ...first, status: 'exited' }], 'app', 'a'));
+});
+
 test('switching Compose files starts a new poll and ignores stale responses', async (t) => {
   const [oldFile, newFile] = composeFiles(t, ['old.yaml', 'new.yaml']);
   const first = deferred();
   const second = deferred();
   const calls = [];
   const podman = {
+    getComposeProjectRevision: (file) => fs.readFileSync(file, 'utf8'),
     composePs: (file) => {
       calls.push(file);
       return calls.length === 1 ? first.promise : second.promise;
@@ -197,6 +305,7 @@ test('switching engines clears Compose statuses before the new poll completes', 
   const second = deferred();
   let calls = 0;
   const provider = new StatusProvider({
+    getComposeProjectRevision: (target) => fs.readFileSync(target, 'utf8'),
     composePs: () => ++calls === 1
       ? Promise.resolve([{ service: 'old', status: 'running' }])
       : second.promise,
@@ -219,6 +328,7 @@ test('deduplicates polling errors until a successful refresh', async (t) => {
   const [file] = composeFiles(t);
   let failing = true;
   const provider = new StatusProvider({
+    getComposeProjectRevision: (target) => fs.readFileSync(target, 'utf8'),
     composePs: async () => {
       if (failing) throw new Error('Podman unavailable');
       return [];
@@ -243,6 +353,7 @@ test('a removed Compose file clears stale status, reports the file and recovers'
   const pending = deferred();
   let calls = 0;
   const provider = new StatusProvider({
+    getComposeProjectRevision: (target) => fs.readFileSync(target, 'utf8'),
     composePs: () => ++calls === 2
       ? pending.promise
       : Promise.resolve([{ service: 'app', status: 'running' }]),
@@ -277,6 +388,7 @@ test('clearing the active Compose file invalidates an in-flight poll', async (t)
   const pending = deferred();
   let calls = 0;
   const provider = new StatusProvider({
+    getComposeProjectRevision: (target) => fs.readFileSync(target, 'utf8'),
     composePs: () => ++calls === 1
       ? Promise.resolve([{ service: 'app', status: 'running' }])
       : pending.promise,
@@ -287,6 +399,26 @@ test('clearing the active Compose file invalidates an in-flight poll', async (t)
   const polling = provider.poll();
   provider.clearActiveFile();
   assert.deepEqual(provider.getContainers(), []);
+  pending.resolve([{ service: 'stale', status: 'running' }]);
+  await polling;
+  assert.deepEqual(provider.getContainers(), []);
+});
+
+test('a project file changing during a poll discards stale Compose statuses', async (t) => {
+  const [file] = composeFiles(t);
+  const pending = deferred();
+  let calls = 0;
+  const provider = new StatusProvider({
+    getComposeProjectRevision: (target) => fs.readFileSync(target, 'utf8'),
+    composePs: () => ++calls === 1
+      ? Promise.resolve([{ service: 'app', status: 'running' }])
+      : pending.promise,
+  }, { parse: () => ({}) });
+  t.after(() => provider.dispose());
+  provider.startPolling(file, 60_000);
+  await tick();
+  const polling = provider.poll();
+  fs.writeFileSync(file, 'services: {new: {}}\n');
   pending.resolve([{ service: 'stale', status: 'running' }]);
   await polling;
   assert.deepEqual(provider.getContainers(), []);

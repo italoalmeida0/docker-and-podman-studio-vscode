@@ -9,6 +9,16 @@ const LEVEL_COLORS: Record<string, string> = {
   debug: 'text-text-muted',
 };
 
+export function formatLogTimestamp(timestamp: string): string {
+  if (!timestamp) return '--:--:--';
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return timestamp;
+  return date.toLocaleString(undefined, {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  });
+}
+
 export const LogViewer: React.FC<{
   entries: LogEntry[];
   filter?: string;
@@ -60,7 +70,7 @@ export const LogViewer: React.FC<{
           filtered.map((item, idx) => (
             <div key={idx} className="flex gap-2.5 hover:bg-white/[0.03] py-0.5 px-1.5 rounded">
               <span className="text-text-muted shrink-0 select-none tabular-nums">
-                {item.timestamp ? item.timestamp.slice(0, 12) : '--:--:--'}
+                {formatLogTimestamp(item.timestamp)}
               </span>
               <span className="text-sky-400/90 shrink-0 select-none font-medium">
                 [{item.service}]

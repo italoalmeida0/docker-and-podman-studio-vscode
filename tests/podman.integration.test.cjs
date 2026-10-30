@@ -82,18 +82,31 @@ test('exercises an isolated Podman Compose project', {
     await waitFor(() => lines.some((line) => line.includes('studio-compose-ready')) || errors.length);
     assert.deepEqual(errors, []);
     assert.ok(lines.some((line) => line.includes('studio-compose-ready')));
+    assert.ok(logProvider.getHistory('app').some((entry) => entry.sourceTimestamp),
+      'Compose logs must retain the provider timestamp');
+    logProvider.stopStreaming('app');
+    succeeded(await service.runEngineCommand([
+      'exec', '--user', '0', running[0].fullId, 'sh', '-c',
+      'printf "studio-while-away\\n" > /proc/1/fd/1',
+    ]));
+    lines.length = 0;
+    await logProvider.startComposeStreaming(composeFile, 'app');
+    await waitFor(() => lines.some((line) => line.includes('studio-while-away')) || errors.length);
+    assert.deepEqual(errors, []);
+    assert.ok(lines.some((line) => line.includes('studio-while-away')));
+    assert.ok(!lines.some((line) => line.includes('studio-compose-ready')),
+      'replayed lines already in history should not be duplicated');
     logProvider.stopStreaming('app');
     succeeded(await service.composeScale(composeFile, 'app', 2));
     assert.equal((await service.composePs(composeFile, doc)).length, 2);
     lines.length = 0;
     await logProvider.startComposeStreaming(composeFile, 'app');
-    await waitFor(() => (
-      lines.some((line) => line.includes(`${project}_app_1`)) &&
-      lines.some((line) => line.includes(`${project}_app_2`))
-    ) || errors.length);
+    await waitFor(() => lines.some((line) => line.includes(`${project}_app_2`)) || errors.length);
     assert.deepEqual(errors, []);
-    assert.ok(lines.some((line) => line.includes(`${project}_app_1`)));
     assert.ok(lines.some((line) => line.includes(`${project}_app_2`)));
+    assert.ok(logProvider.getHistory('app').some((entry) => entry.message.includes(`${project}_app_1`)));
+    assert.ok(!lines.some((line) => line.includes(`${project}_app_1`)),
+      'the existing replica history should not be replayed as new output');
     logProvider.stopStreaming('app');
     succeeded(await service.composeStop(composeFile));
     const stoppedReplicas = await service.composePs(composeFile, doc);

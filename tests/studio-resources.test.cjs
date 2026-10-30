@@ -256,11 +256,13 @@ test('Compose selected removal stops every selected replica without deleting oth
   const calls = [];
   service.runEngineCommand = async (args, options) => {
     calls.push({ args, options });
+    if (args[1] === 'inspect') return ok(args.slice(4).map((containerId) => `${containerId} []`).join('\n'));
     return ok();
   };
   const result = await service.composeRemoveServices(file, ['app', 'worker'], undefined, fs.readFileSync(file, 'utf8'));
   assert.equal(result.success, true);
   assert.deepEqual(calls.map((call) => call.args), [
+    ['container', 'inspect', '--format', '{{.Id}} {{json .Dependencies}}', app1.fullId, app2.fullId, worker.fullId],
     ['container', 'stop', '--time', '2', app1.fullId], ['container', 'rm', app1.fullId],
     ['container', 'stop', '--time', '2', app2.fullId], ['container', 'rm', app2.fullId],
     ['container', 'stop', worker.fullId], ['container', 'rm', worker.fullId],
@@ -280,6 +282,7 @@ test('Compose selected removal reports partial failures and does not retry faile
   const calls = [];
   service.runEngineCommand = async (args) => {
     calls.push(args);
+    if (args[1] === 'inspect') return ok(args.slice(4).map((containerId) => `${containerId} []`).join('\n'));
     return args[1] === 'stop' && args.at(-1) === id('b') ? failed('stop denied') : ok();
   };
   const result = await service.composeRemoveServices(file, ['app']);
@@ -287,6 +290,118 @@ test('Compose selected removal reports partial failures and does not retry faile
   assert.match(result.stdout, /app-a[\s\S]*app-c/);
   assert.match(result.stderr, /app-b: stop denied/);
   assert.equal(calls.filter((args) => args.at(-1) === id('b')).length, 1);
+});
+
+test('Compose selected removal removes dependent containers before their dependencies', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-dependencies-'));
+  const file = path.join(dir, 'compose.yaml');
+  fs.writeFileSync(file, 'services:\n  app: {}\n  worker:\n    depends_on: [app]\n');
+  t.after(() => { fs.unlinkSync(file); fs.rmdirSync(dir); });
+  const service = new PodmanService();
+  const app = { fullId: id('a'), name: 'app-1', service: 'app' };
+  const worker = { fullId: id('b'), name: 'worker-1', service: 'worker' };
+  const remaining = new Set([app.fullId, worker.fullId]);
+  const removals = [];
+  service.composePs = async () => [app, worker].filter((container) => remaining.has(container.fullId));
+  service.runComposeCommand = async () => ok(fs.readFileSync(file, 'utf8'));
+  service.runEngineCommand = async (args) => {
+    if (args[1] === 'inspect') {
+      return ok(`${app.fullId} []\n${worker.fullId} ["${app.fullId}"]\n`);
+    }
+    if (args[1] === 'rm') {
+      removals.push(args.at(-1));
+      if (args.at(-1) === app.fullId && remaining.has(worker.fullId)) {
+        return failed('has dependent containers');
+      }
+      remaining.delete(args.at(-1));
+    }
+    return ok();
+  };
+  const result = await service.composeRemoveServices(file, ['app', 'worker']);
+  assert.equal(result.success, true, result.stderr);
+  assert.deepEqual(removals, [worker.fullId, app.fullId]);
+  assert.equal(remaining.size, 0);
+});
+
+test('Compose selected removal never deletes an unselected dependent', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-unselected-dependency-'));
+  const file = path.join(dir, 'compose.yaml');
+  fs.writeFileSync(file, 'services:\n  app: {}\n  worker:\n    depends_on: [app]\n');
+  t.after(() => { fs.unlinkSync(file); fs.rmdirSync(dir); });
+  const service = new PodmanService();
+  const app = { fullId: id('a'), name: 'app-1', service: 'app' };
+  const worker = { fullId: id('b'), name: 'worker-1', service: 'worker' };
+  service.composePs = async () => [app, worker];
+  service.runComposeCommand = async () => ok(fs.readFileSync(file, 'utf8'));
+  const calls = [];
+  service.runEngineCommand = async (args) => {
+    calls.push(args);
+    return args[1] === 'rm' ? failed('has dependent containers') : ok();
+  };
+  const result = await service.composeRemoveServices(file, ['app']);
+  assert.equal(result.success, false);
+  assert.match(result.stderr, /app-1: has dependent containers/);
+  assert.deepEqual(calls, [
+    ['container', 'stop', app.fullId], ['container', 'rm', app.fullId],
+  ]);
+});
+
+test('Compose selected removal refuses missing, invalid, cyclic or failed dependency inspections', async () => {
+  const file = path.join(__dirname, 'fixtures', 'compose-project-name.yaml');
+  const containers = ['a', 'b'].map((character) => ({
+    fullId: id(character), name: `app-${character}`, service: 'app',
+  }));
+  const attempts = [
+    [failed('inspect denied'), /inspect denied/],
+    [ok(`${id('a')} []`), /incomplete.*dependency data/i],
+    [ok(`${id('a')} []\n${id('b')} ["not-an-id"]`), /invalid.*dependency data/i],
+    [ok(`${id('a')} ["${id('b')}"]\n${id('b')} ["${id('a')}"]`), /cyclic dependencies/i],
+  ];
+  for (const [inspection, expectedError] of attempts) {
+    const service = new PodmanService();
+    service.composePs = async () => containers;
+    service.runComposeCommand = async () => ok(fs.readFileSync(file, 'utf8'));
+    const calls = [];
+    service.runEngineCommand = async (args) => {
+      calls.push(args);
+      return inspection;
+    };
+    await assert.rejects(() => service.composeRemoveServices(file, ['app']), expectedError);
+    assert.deepEqual(calls.map((args) => args[1]), ['inspect']);
+  }
+});
+
+test('Compose dependency inspection uses bounded batches and rechecks settings before removal', async () => {
+  const file = path.join(__dirname, 'fixtures', 'compose-project-name.yaml');
+  const containers = Array.from({ length: 101 }, (_, index) => ({
+    fullId: index.toString(16).padStart(64, '0'), name: `app-${index}`, service: 'app',
+  }));
+  const service = new PodmanService();
+  let queries = 0;
+  service.composePs = async () => ++queries === 1 ? containers : [];
+  service.runComposeCommand = async () => ok(fs.readFileSync(file, 'utf8'));
+  const inspections = [];
+  service.runEngineCommand = async (args) => {
+    if (args[1] === 'inspect') {
+      inspections.push(args.slice(4));
+      return ok(args.slice(4).map((containerId) => `${containerId} []`).join('\n'));
+    }
+    return ok();
+  };
+  assert.equal((await service.composeRemoveServices(file, ['app'])).success, true);
+  assert.deepEqual(inspections.map((batch) => batch.length), [100, 1]);
+
+  const changed = new PodmanService();
+  changed.composePs = async () => containers.slice(0, 2);
+  changed.runComposeCommand = async () => ok(fs.readFileSync(file, 'utf8'));
+  const calls = [];
+  changed.runEngineCommand = async (args) => {
+    calls.push(args);
+    config.podmanPath = 'different-podman';
+    return ok(args.slice(4).map((containerId) => `${containerId} []`).join('\n'));
+  };
+  await assert.rejects(() => changed.composeRemoveServices(file, ['app']), /settings or file changed/i);
+  assert.deepEqual(calls.map((args) => args[1]), ['inspect']);
 });
 
 test('container tree groups pods and Compose projects, preserves empty pods and filters', () => {

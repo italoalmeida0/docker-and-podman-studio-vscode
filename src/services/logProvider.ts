@@ -10,6 +10,10 @@ interface LogStream {
   processes: Set<ChildProcess>;
 }
 
+function logIdentity(entry: LogEntry): string {
+  return JSON.stringify([entry.service, entry.timestamp, entry.message]);
+}
+
 export class LogProvider implements vscode.Disposable {
   private readonly streams = new Map<string, LogStream>();
   private readonly history = new Map<string, LogEntry[]>();
@@ -20,23 +24,45 @@ export class LogProvider implements vscode.Disposable {
 
   constructor(private readonly podman: PodmanService) {}
 
-  public async startComposeStreaming(composeFile: string, service: string): Promise<void> {
-    this.stopStreaming(service);
+  public async startComposeStreaming(
+    composeFile: string,
+    service: string,
+    options?: { key?: string; containerId?: string; tail?: number }
+  ): Promise<void> {
+    const key = options?.key || service;
+    this.stopStreaming(key);
     const stream: LogStream = { processes: new Set() };
-    this.streams.set(service, stream);
+    this.streams.set(key, stream);
     try {
-      const sources = await this.podman.streamComposeLogs(composeFile, service, 150);
-      if (this.streams.get(service) !== stream) {
+      const replayable = options?.tail === undefined
+        ? this.getHistory(key).filter((entry) =>
+          entry.sourceTimestamp && Number.isFinite(Date.parse(entry.timestamp)))
+        : [];
+      const earliest = replayable.reduce<number | undefined>((minimum, entry) => {
+        const time = Date.parse(entry.timestamp);
+        return minimum === undefined || time < minimum ? time : minimum;
+      }, undefined);
+      const since = earliest === undefined ? undefined : new Date(earliest).toISOString();
+      const replayCounts = new Map<string, number>();
+      for (const entry of replayable) {
+        const identity = logIdentity(entry);
+        replayCounts.set(identity, (replayCounts.get(identity) || 0) + 1);
+      }
+      const sources = await this.podman.streamComposeLogs(
+        composeFile, service, options?.tail ?? (this.getHistory(key).length ? 0 : 150),
+        undefined, options?.containerId, since
+      );
+      if (this.streams.get(key) !== stream) {
         sources.forEach((source) => source.process.kill('SIGTERM'));
         return;
       }
       sources.forEach((source) => stream.processes.add(source.process));
       sources.forEach((source) =>
-        this.attachStream(service, stream, source.process, source.containerName)
+        this.attachStream(key, stream, source.process, source.containerName, service, options?.key, replayCounts)
       );
     } catch (error) {
-      if (this.streams.get(service) === stream) {
-        this.streams.delete(service);
+      if (this.streams.get(key) === stream) {
+        this.streams.delete(key);
         throw error;
       }
     }
@@ -55,7 +81,15 @@ export class LogProvider implements vscode.Disposable {
     }
   }
 
-  private attachStream(key: string, stream: LogStream, proc: ChildProcess, containerName?: string): void {
+  private attachStream(
+    key: string,
+    stream: LogStream,
+    proc: ChildProcess,
+    containerName?: string,
+    displayService = key,
+    target?: string,
+    replayCounts?: Map<string, number>
+  ): void {
     stream.processes.add(proc);
     const isCurrent = () => this.streams.get(key) === stream && stream.processes.has(proc);
     const stdout = { decoder: new StringDecoder('utf8'), pending: '' };
@@ -66,8 +100,18 @@ export class LogProvider implements vscode.Disposable {
       if (!trimmed || trimmed.startsWith('>>>> Executing external compose provider')) {
         return;
       }
-      const entry = this.parseLine(key, line);
+      const entry = this.parseLine(displayService, line);
+      if (target) entry.target = target;
       if (containerName) entry.message = `[${containerName}] ${entry.message}`;
+      if (entry.sourceTimestamp && replayCounts) {
+        const identity = logIdentity(entry);
+        const remaining = replayCounts.get(identity) || 0;
+        if (remaining > 0) {
+          if (remaining === 1) replayCounts.delete(identity);
+          else replayCounts.set(identity, remaining - 1);
+          return;
+        }
+      }
       this.appendToHistory(key, entry);
       this._onLogLine.fire(entry);
     };
@@ -106,14 +150,14 @@ export class LogProvider implements vscode.Disposable {
       if (stream.processes.size === 0) this.streams.delete(key);
       if (code !== 0) {
         const detail = stderrTail.trim() || (signal ? `signal ${signal}` : `exit code ${code}`);
-        this._onError.fire(bt('logStreamError', { name: key, error: detail }));
+        this._onError.fire(bt('logStreamError', { name: displayService, error: detail }));
       }
     });
     proc.on('error', (error) => {
       if (isCurrent()) {
         stream.processes.delete(proc);
         if (stream.processes.size === 0) this.streams.delete(key);
-        this._onError.fire(bt('logStreamError', { name: key, error: error.message }));
+        this._onError.fire(bt('logStreamError', { name: displayService, error: error.message }));
       }
     });
   }
@@ -137,24 +181,24 @@ export class LogProvider implements vscode.Disposable {
 
   public parseLine(service: string, rawLine: string): LogEntry {
     const line = rawLine.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
-    let msg = line;
+    const prefixMatch = line.match(/^\S+\s*\|\s*(.*)/);
+    let msg = prefixMatch ? prefixMatch[1] : line;
     let timestamp = new Date().toISOString();
 
-    const tsMatch = line.match(/^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}[\d.:+-]*Z?)\s+(.*)/);
+    const tsMatch = msg.match(/^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2}))\s+(.*)/);
     if (tsMatch) {
       timestamp = tsMatch[1];
       msg = tsMatch[2];
     }
-    const prefixMatch = msg.match(/^\S+\s*\|\s*(.*)/);
-    if (prefixMatch) {
-      msg = prefixMatch[1];
-    }
+    const remainingPrefix = msg.match(/^\S+\s*\|\s*(.*)/);
+    if (remainingPrefix) msg = remainingPrefix[1];
 
     return {
       service,
       timestamp,
       message: msg,
       level: this.detectLevel(msg),
+      ...(tsMatch ? { sourceTimestamp: true } : {}),
     };
   }
 

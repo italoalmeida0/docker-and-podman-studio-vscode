@@ -22,14 +22,19 @@ import {
   ComposeCompletionProvider,
 } from './language/completionProvider';
 import { ComposeDiagnosticsProvider } from './language/diagnosticsProvider';
-import { ComposeFileDetector } from './services/composeDetector';
+import { ComposeFileDetector, mergeComposeFileList } from './services/composeDetector';
+import { assertComposeEditBase, composeEditStatuses } from './services/composeEdit';
 import { LogProvider } from './services/logProvider';
 import { PodmanService } from './services/podmanService';
 import { StatusProvider } from './services/statusProvider';
 import { YamlService } from './services/yamlService';
+import { buildComposeDocument, serializeComposeBuilder } from './shared/composeBuilder';
+import { composeLogKey } from './shared/composeLogs';
 import {
   InboundCommand as M,
   OutboundCommand as A,
+  ComposeDocument,
+  ComposeProjectOptions,
   PodmanBatchResource,
   RemovableResource,
   ResourceRemovalTarget,
@@ -46,7 +51,7 @@ import { NativeCommandsManager } from './wizards/nativeWizards';
 const ACTIVE_STATES = new Set(['running', 'unhealthy', 'starting', 'stopping', 'restarting']);
 
 function isActiveComposeStatus(status: ServiceStatus, engine: ContainerEngine): boolean {
-  return ACTIVE_STATES.has(status) || (engine === 'podman' && status === 'paused');
+  return ACTIVE_STATES.has(status) || status === 'paused';
 }
 
 function cleanRegistryHost(url: string): string {
@@ -151,59 +156,6 @@ export function httpGetJson(
   });
 }
 
-function parseLines(text?: string): string[] {
-  return String(text || '')
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean);
-}
-
-function parseEnvText(text?: string): Record<string, string> | undefined {
-  const entries = parseLines(text)
-    .map((line) => {
-      const idx = line.indexOf('=');
-      return idx === -1
-        ? [line.trim(), '']
-        : [line.slice(0, idx).trim(), line.slice(idx + 1).trim()];
-    })
-    .filter(([k]) => Boolean(k));
-  return entries.length > 0 ? Object.fromEntries(entries) : undefined;
-}
-
-function parseDependsText(text?: string): any {
-  const lines = parseLines(text);
-  if (lines.length === 0) {
-    return undefined;
-  }
-  if (lines.some((l) => l.includes(':'))) {
-    return Object.fromEntries(
-      lines
-        .map((l) => {
-          const [svc, cond] = l.split(':').map((x) => x.trim());
-          return [svc, cond ? { condition: cond } : {}];
-        })
-        .filter(([svc]) => Boolean(svc))
-    );
-  }
-  return lines;
-}
-
-function namedVolumeFromMount(spec: string): string | undefined {
-  const trimmed = spec.trim();
-  if (!trimmed) {
-    return undefined;
-  }
-  // Ignore Windows drive paths such as C:\foo:/bar or relative/absolute host paths
-  if (/^[a-zA-Z]:[\\/]/.test(trimmed)) {
-    return undefined;
-  }
-  const [source] = trimmed.split(':');
-  if (!source || source.startsWith('.') || source.startsWith('/') || source.startsWith('~') || source.includes('\\')) {
-    return undefined;
-  }
-  return source;
-}
-
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const podman = new PodmanService();
   const yamlService = new YamlService();
@@ -216,12 +168,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const output = vscode.window.createOutputChannel('Docker and Podman Studio');
 
   let activeComposeFile: string | undefined;
+  let activeComposeWatchers: vscode.FileSystemWatcher[] = [];
+  let watchedComposeKey = '';
+  let resolvedCompose: {
+    file: string;
+    revision: string;
+    document?: ComposeDocument;
+    error?: string;
+  } | undefined;
+  let pendingComposeResolution: { file: string; revision: string } | undefined;
   let refreshGeneration = 0;
   let imageSearchGeneration = 0;
   let imageSearchController: AbortController | undefined;
   let lastRefreshError = '';
   let nextOperationId = 0;
   const listGenerations = new Map<string, number>();
+  const composeOptionsKey = 'composeProjectOptions';
+  const storedComposeOptions: Record<string, ComposeProjectOptions> =
+    context.workspaceState.get<Record<string, ComposeProjectOptions>>(composeOptionsKey, {});
+  for (const [file, options] of Object.entries(storedComposeOptions)) {
+    try {
+      podman.setComposeProjectOptions(file, options, false);
+    } catch (error) {
+      const message = `Could not restore Compose options for ${file}: ${error instanceof Error ? error.message : String(error)}`;
+      output.appendLine(`[${new Date().toISOString()}] ${message}`);
+      void vscode.window.showWarningMessage(message);
+    }
+  }
 
   function cancelImageSearch(): number {
     imageSearchGeneration++;
@@ -279,7 +252,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   function getComposeFileList(): string[] {
     const detected = fileDetector.getFiles();
     if (activeComposeFile && fs.existsSync(activeComposeFile)) {
-      return Array.from(new Set([...detected, activeComposeFile])).sort();
+      return mergeComposeFileList(detected, activeComposeFile);
     }
     return detected;
   }
@@ -301,6 +274,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   function sendComposeState(): void {
     const file = getActiveComposeFile();
+    let snapshot: ReturnType<PodmanService['getComposeProjectSnapshot']> | undefined;
+    let snapshotError: unknown;
+    if (file) {
+      try {
+        snapshot = podman.getComposeProjectSnapshot(file);
+      } catch (error) {
+        snapshotError = error;
+      }
+    }
+    try {
+      watchActiveComposeFile(file, snapshot?.dependencies.files.map((dependency) => dependency.path));
+    } catch (error) {
+      reportError(error);
+    }
     studioPanel.postMessage({
       command: A.COMPOSE_FILES_UPDATE,
       payload: getComposeFileList(),
@@ -312,22 +299,186 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       });
       return;
     }
+    let rawYaml: string;
     try {
-      const rawYaml = fs.readFileSync(file, 'utf-8');
-      const document = yamlService.parse(rawYaml);
-      studioPanel.postMessage({
-        command: A.COMPOSE_UPDATE,
-        payload: { document, activeFile: file, rawYaml },
+      rawYaml = fs.readFileSync(file, 'utf-8');
+    } catch (error) {
+      reportError(error);
+      return;
+    }
+    let document: ComposeDocument = { services: {} };
+    let serviceFragments: Record<string, string> = {};
+    let parseError: string | null = null;
+    try {
+      ({ document, serviceFragments } = yamlService.parseWithServiceFragments(rawYaml));
+    } catch (error) {
+      parseError = error instanceof Error ? error.message : String(error);
+    }
+    const options = snapshot?.options ?? podman.getComposeProjectOptions(file);
+    const customized = snapshot?.customized ?? false;
+    const dependenciesIncomplete = snapshot?.dependencies.incomplete ?? false;
+    const revision = snapshot?.revision ?? null;
+    let projectError: string | null = snapshotError
+      ? snapshotError instanceof Error ? snapshotError.message : String(snapshotError)
+      : null;
+    const cached = resolvedCompose?.file === file && resolvedCompose.revision === revision
+      ? resolvedCompose : undefined;
+    if (customized && cached?.document) {
+      document = cached.document;
+    }
+    projectError ||= customized ? cached?.error || null : null;
+    const resolving = Boolean(customized && revision && !parseError && !projectError && !cached);
+    studioPanel.postMessage({
+      command: A.COMPOSE_UPDATE,
+      payload: {
+        document, activeFile: file, rawYaml, serviceFragments, parseError,
+        projectOptions: options, projectRevision: revision, projectError,
+        projectResolving: resolving, projectCustomized: customized, dependenciesIncomplete,
+      },
+    });
+    if (resolving && revision &&
+        (pendingComposeResolution?.file !== file || pendingComposeResolution.revision !== revision)) {
+      const pending = { file, revision };
+      pendingComposeResolution = pending;
+      void podman.resolveComposeDocument(file).then((resolved) => {
+        if (pendingComposeResolution !== pending || getActiveComposeFile() !== file ||
+            podman.getComposeProjectRevision(file) !== revision) {
+          if (pendingComposeResolution === pending) {
+            pendingComposeResolution = undefined;
+            sendComposeState();
+          }
+          return;
+        }
+        resolvedCompose = { file, revision, document: resolved };
+        sendComposeState();
+      }).catch((error: unknown) => {
+        if (pendingComposeResolution !== pending || getActiveComposeFile() !== file) return;
+        let currentRevision: string;
+        try {
+          currentRevision = podman.getComposeProjectRevision(file);
+        } catch {
+          sendComposeState();
+          return;
+        }
+        if (currentRevision !== revision) {
+          pendingComposeResolution = undefined;
+          sendComposeState();
+          return;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        resolvedCompose = { file, revision, error: message };
+        reportError(message);
+        sendComposeState();
+      }).finally(() => {
+        if (pendingComposeResolution === pending) pendingComposeResolution = undefined;
       });
-    } catch (err: any) {
+    }
+  }
+
+  function watchActiveComposeFile(file?: string, watchedFiles?: string[]): void {
+    const files = file ? watchedFiles ?? podman.getComposeProjectWatchedFiles(file) : [];
+    const key = JSON.stringify([file, files]);
+    if (watchedComposeKey === key) {
+      return;
+    }
+    activeComposeWatchers.forEach((watcher) => watcher.dispose());
+    activeComposeWatchers = [];
+    watchedComposeKey = key;
+    if (!file) {
+      return;
+    }
+    for (const target of files) {
+      const watcher = vscode.workspace.createFileSystemWatcher(
+        new vscode.RelativePattern(path.dirname(target), path.basename(target))
+      );
+      const update = () => {
+        if (watchedComposeKey === key && getActiveComposeFile() === file) {
+          resolvedCompose = undefined;
+          statusProvider.clearActiveFile();
+          statusProvider.startPolling(file, getConfig().pollingInterval);
+          sendComposeState();
+        }
+      };
+      watcher.onDidChange(update);
+      watcher.onDidCreate(update);
+      watcher.onDidDelete(update);
+      activeComposeWatchers.push(watcher);
+    }
+  }
+
+  context.subscriptions.push(
+    fileDetector.onFilesChanged(() => sendComposeState()),
+    { dispose: () => activeComposeWatchers.forEach((watcher) => watcher.dispose()) }
+  );
+  watchActiveComposeFile(activeComposeFile);
+
+  function readComposeEditBase(file: string | undefined, payload: any): string {
+    assertComposeProjectContext(file, payload);
+    const content = file && fs.existsSync(file) ? fs.readFileSync(file, 'utf-8') : '';
+    const normalized = file && path.normalize(file);
+    const dirtyEditor = Boolean(normalized && vscode.workspace.textDocuments.some((document) => {
+      const documentPath = path.normalize(document.fileName);
+      return document.isDirty && (process.platform === 'win32'
+        ? documentPath.toLowerCase() === normalized.toLowerCase()
+        : documentPath === normalized);
+    }));
+    assertComposeEditBase({
+      activeFile: getActiveComposeFile(),
+      requestedFile: payload.file,
+      expectedContent: payload.baseYaml,
+      currentContent: content,
+      dirtyEditor,
+    });
+    if (file !== getActiveComposeFile()) {
+      throw new Error('The active Compose file changed. Refresh and retry the edit.');
+    }
+    return content;
+  }
+
+  function hasDirtyProjectEditor(files: string[]): boolean {
+    const paths = new Set(files.map((file) => {
+      const normalized = path.normalize(file);
+      return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+    }));
+    return vscode.workspace.textDocuments.some((document) => {
+      const normalized = path.normalize(document.fileName);
+      return document.isDirty && paths.has(
+        process.platform === 'win32' ? normalized.toLowerCase() : normalized
+      );
+    });
+  }
+
+  function assertComposeProjectContext(
+    file: string | undefined,
+    payload: any,
+    allowDirtyEditors = false
+  ): asserts file is string {
+    if (!file || payload.file !== file || getActiveComposeFile() !== file ||
+        payload.engine !== getConfig().engine ||
+        typeof payload.projectRevision !== 'string' ||
+        podman.getComposeProjectRevision(file) !== payload.projectRevision) {
+      throw new Error('The active Compose project, settings, or files changed. Refresh and try again.');
+    }
+    if (!allowDirtyEditors && hasDirtyProjectEditor(podman.getComposeProjectWatchedFiles(file))) {
+      throw new Error('Save or discard unsaved VS Code changes in the Compose project files before continuing.');
+    }
+  }
+
+  function assertVisualComposeEditAllowed(file: string): void {
+    if (podman.hasCustomComposeProject(file)) {
+      throw new Error('Visual edits are disabled for a resolved project with overrides, profiles, an environment file, includes, or extends. Edit the base YAML explicitly.');
+    }
+  }
+
+  function saveComposeEdit(file: string, payload: any, content: string, requestId?: string): void {
+    readComposeEditBase(file, payload);
+    fs.writeFileSync(file, content, 'utf-8');
+    sendComposeState();
+    if (requestId) {
       studioPanel.postMessage({
-        command: A.ERROR,
-        payload: {
-          message: bt('yamlReadError', {
-            file: path.basename(file),
-            err: err?.message || String(err),
-          }),
-        },
+        command: A.COMPOSE_EDIT_SAVED,
+        payload: { file },
+        requestId,
       });
     }
   }
@@ -528,19 +679,42 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }));
   }
 
-  async function currentComposeStatuses() {
+  async function currentComposeStatuses(allowInvalid = false) {
     const file = getActiveComposeFile();
-    if (getConfig().engine === 'podman' && file) {
-      const doc = yamlService.parse(fs.readFileSync(file, 'utf-8'));
-      return podman.composePs(file, doc);
+    if (!file) {
+      throw new Error('No active Compose file.');
     }
-    return statusProvider.getContainers();
+    const engine = getConfig().engine;
+    const revision = podman.getComposeProjectRevision(file);
+    let doc: ComposeDocument;
+    try {
+      doc = yamlService.parse(fs.readFileSync(file, 'utf-8'));
+    } catch (error) {
+      if (!allowInvalid) throw error;
+      const active = (await podman.listAllContainers())
+        .filter((container) => !container.isInfra && isActiveComposeStatus(container.state, engine));
+      if (getActiveComposeFile() !== file || podman.getComposeProjectRevision(file) !== revision) {
+        throw new Error('The Compose project changed while checking running containers.');
+      }
+      if (active.length) {
+        throw new Error('Cannot safely verify this invalid Compose file while containers are active. Stop them or repair the file in the VS Code editor first.');
+      }
+      return [];
+    }
+    const [statuses, containers] = await Promise.all([
+      podman.composePs(file, doc),
+      podman.listAllContainers(),
+    ]);
+    if (getActiveComposeFile() !== file || podman.getComposeProjectRevision(file) !== revision) {
+      throw new Error('The Compose project changed while checking running containers.');
+    }
+    return composeEditStatuses(podman.getComposeProjectWatchedFiles(file), statuses, containers);
   }
 
   async function ensureServiceStopped(serviceName: string): Promise<void> {
     const engine = getConfig().engine;
     const found = (await currentComposeStatuses())
-      .find((c) => c.service === serviceName && isActiveComposeStatus(c.status, engine));
+      .find((c) => (!c.service || c.service === serviceName) && isActiveComposeStatus(c.status, engine));
     if (found) {
       throw new Error(bt('stopServiceBeforeEdit', { service: serviceName }));
     }
@@ -548,10 +722,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   async function ensureAllServicesStopped(): Promise<void> {
     const engine = getConfig().engine;
-    const active = (await currentComposeStatuses())
+    const active = (await currentComposeStatuses(true))
       .filter((c) => isActiveComposeStatus(c.status, engine))
-      .map((c) => c.service)
-      .filter(Boolean);
+      .map((c) => c.service || '(unknown service)');
     if (active.length > 0) {
       throw new Error(
         bt('stopAllBeforeRawSave', {
@@ -616,7 +789,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         void showErrorWithCopy(`${label}: ${msg}`, res.commandStr);
         return false;
       }
-      const details = options?.includeOutput ? res.stdout?.trim() || '' : '';
+      const details = options?.includeOutput
+        ? [res.stdout?.trim(), res.stderr?.trim()].filter(Boolean).join('\n')
+        : '';
       if (details) {
         output.appendLine(`[${new Date().toISOString()}] ${label}:\n${details}`);
       }
@@ -830,7 +1005,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     };
     const initialSettings = settingsKey();
     if (!composeFile || payload.file !== composeFile || payload.engine !== cfg.engine ||
-        !['up', 'stop', 'restart', 'down', 'build'].includes(payload.action) ||
+        !['up', 'stop', 'restart', 'down', 'build', 'rebuild', 'build-up'].includes(payload.action) ||
         typeof payload.rawYaml !== 'string' ||
         !Array.isArray(payload.services) || payload.services.length === 0 ||
         payload.services.some((service: unknown) =>
@@ -839,13 +1014,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       throw new Error('Invalid Compose selection or the active project changed. Refresh and try again.');
     }
     const services: string[] = payload.services;
+    const allowDirtyEditors = payload.action === 'stop' || payload.action === 'down';
+    assertComposeProjectContext(composeFile, payload, allowDirtyEditors);
     const content = fs.readFileSync(composeFile, 'utf-8');
-    if (payload.rawYaml !== content) {
+    if (content !== payload.rawYaml) {
       throw new Error('The Compose file changed. Refresh and try again.');
     }
-    const doc = yamlService.parse(content);
+    const doc = podman.hasCustomComposeProject(composeFile)
+      ? await podman.resolveComposeDocument(composeFile)
+      : yamlService.parse(content);
+    assertComposeProjectContext(composeFile, payload, allowDirtyEditors);
     if (services.some((service) => !Object.prototype.hasOwnProperty.call(doc.services || {}, service))) {
       throw new Error('A selected Compose service no longer exists. Refresh and try again.');
+    }
+    if (['build', 'rebuild', 'build-up'].includes(payload.action) &&
+        services.some((service) => !doc.services[service]?.build)) {
+      throw new Error('Every selected service must have a build configuration.');
     }
     if (payload.action === 'down') {
       const yes = bt('yes');
@@ -858,14 +1042,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       }
     }
-    if (settingsKey() !== initialSettings || getActiveComposeFile() !== composeFile ||
-        fs.readFileSync(composeFile, 'utf-8') !== content) {
+    assertComposeProjectContext(composeFile, payload, allowDirtyEditors);
+    if (settingsKey() !== initialSettings || fs.readFileSync(composeFile, 'utf-8') !== content) {
       throw new Error('Compose settings or file changed. Refresh and try again.');
     }
-    const action = payload.action as 'up' | 'stop' | 'restart' | 'down' | 'build';
+    const action = payload.action as 'up' | 'stop' | 'restart' | 'down' | 'build' | 'rebuild' | 'build-up';
     const label = bt('batchOperation', {
       action: bt(action === 'up' ? 'batchStart' : action === 'stop' ? 'batchStop' :
-        action === 'restart' ? 'batchRestart' : action === 'build' ? 'batchBuild' : 'batchRemove'),
+        action === 'restart' ? 'batchRestart' : action === 'build' ? 'batchBuild' :
+        action === 'rebuild' ? 'batchRebuild' : action === 'build-up' ? 'batchBuildUp' : 'batchRemove'),
       count: services.length,
       resource: bt('batchServices'),
     });
@@ -875,8 +1060,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         if (action === 'stop') return podman.composeStop(composeFile, services);
         if (action === 'restart') return podman.composeRestart(composeFile, services);
         if (action === 'build') return podman.composeBuild(composeFile, services);
+        if (action === 'rebuild') return podman.composeBuild(composeFile, services, undefined, { noCache: true });
+        if (action === 'build-up') return podman.composeBuildUp(composeFile, services);
         return podman.composeRemoveServices(composeFile, services, doc, content);
-      }, { includeOutput: action === 'down' });
+      }, { includeOutput: action === 'down' || action === 'build' || action === 'rebuild' || action === 'build-up' });
     } finally {
       await refreshAllStudioData();
     }
@@ -1334,6 +1521,83 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           }
           break;
         }
+        case M.COMPOSE_OPTIONS_PICK: {
+          if (!composeFile || payload.file !== composeFile ||
+              !['files', 'env'].includes(payload.kind)) {
+            throw new Error('The active Compose project changed. Refresh and try again.');
+          }
+          const picked = await vscode.window.showOpenDialog({
+            canSelectFiles: true,
+            canSelectFolders: false,
+            canSelectMany: payload.kind === 'files',
+            defaultUri: vscode.Uri.file(path.dirname(composeFile)),
+            ...(payload.kind === 'files' ? { filters: { 'Compose YAML': ['yml', 'yaml'] } } : {}),
+          });
+          if (picked?.length && getActiveComposeFile() === composeFile) {
+            studioPanel.postMessage({
+              command: A.COMPOSE_OPTIONS_SELECTED,
+              payload: { file: composeFile, kind: payload.kind, paths: picked.map((item) => item.fsPath) },
+              requestId: msg.requestId,
+            });
+          }
+          break;
+        }
+        case M.COMPOSE_OPTIONS_SAVE: {
+          if (!composeFile || payload.file !== composeFile || payload.engine !== getConfig().engine ||
+              typeof payload.rawYaml !== 'string') {
+            throw new Error('The active Compose project changed. Refresh and try again.');
+          }
+          const previous = podman.getComposeProjectOptions(composeFile);
+          const next = podman.validateComposeProjectOptions(composeFile, payload.options);
+          const previousKey = JSON.stringify(previous);
+          const checkPrevious = () => {
+            if (getActiveComposeFile() !== composeFile || getConfig().engine !== payload.engine ||
+                JSON.stringify(podman.getComposeProjectOptions(composeFile)) !== previousKey ||
+                JSON.stringify(payload.previousOptions) !== previousKey ||
+                fs.readFileSync(composeFile, 'utf-8') !== payload.rawYaml ||
+                (typeof payload.projectRevision === 'string' &&
+                  podman.getComposeProjectRevision(composeFile) !== payload.projectRevision)) {
+              throw new Error('The Compose project changed. Refresh and try again.');
+            }
+            if (hasDirtyProjectEditor([...podman.getComposeProjectWatchedFiles(composeFile),
+              ...podman.getComposeProjectWatchedFiles(composeFile, next)])) {
+              throw new Error('Save or discard unsaved VS Code changes in the Compose project files before continuing.');
+            }
+          };
+          await withStudioProgress('compose-options', 'Validate Compose configuration', async () => {
+            checkPrevious();
+            const nextRevision = podman.getComposeProjectRevision(composeFile, next);
+            const doc = await podman.resolveComposeDocument(composeFile, next);
+            checkPrevious();
+            if (podman.getComposeProjectRevision(composeFile, next) !== nextRevision) {
+              throw new Error('A Compose project file changed during validation. Try again.');
+            }
+            podman.setComposeProjectOptions(composeFile, next);
+            const oldStored = storedComposeOptions[composeFile];
+            storedComposeOptions[composeFile] = next;
+            try {
+              await context.workspaceState.update(composeOptionsKey, { ...storedComposeOptions });
+            } catch (error) {
+              podman.setComposeProjectOptions(composeFile, previous, false);
+              if (oldStored) storedComposeOptions[composeFile] = oldStored;
+              else delete storedComposeOptions[composeFile];
+              throw error;
+            }
+            resolvedCompose = { file: composeFile, revision: nextRevision, document: doc };
+            pendingComposeResolution = undefined;
+            if (getActiveComposeFile() === composeFile) {
+              statusProvider.clearActiveFile();
+              statusProvider.startPolling(composeFile, getConfig().pollingInterval);
+              sendComposeState();
+            }
+            studioPanel.postMessage({
+              command: A.COMPOSE_OPTIONS_SAVED,
+              payload: { file: composeFile },
+              requestId: msg.requestId,
+            });
+          });
+          break;
+        }
         case M.COMPOSE_DIRECTORY_PICK: {
           const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
           const picked = await vscode.window.showOpenDialog({
@@ -1398,96 +1662,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           if (fs.existsSync(targetPath)) {
             throw new Error(bt('fileAlreadyExists', { path: targetPath }));
           }
+          const yaml = serializeComposeBuilder(payload.spec);
           fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-
-          const includeSvc = Boolean(payload.includeSampleService);
-          const svcName = String(payload.serviceName || 'app').trim() || 'app';
-          const includeNet = Boolean(payload.includeNetwork);
-          const includeVol = Boolean(payload.includeVolume);
-          const netName = String(payload.networkName || 'app-net').trim() || 'app-net';
-          const volName = String(payload.volumeName || 'app-data').trim() || 'app-data';
-          const sourceMode = payload.serviceSource === 'build' ? 'build' : 'image';
-          const defaultDockerfile = engine === 'podman' ? 'Containerfile' : 'Dockerfile';
-          const ports = Array.isArray(payload.ports)
-            ? payload.ports.map((p: any) => String(p).trim()).filter(Boolean)
-            : [];
-          const volSpecs = parseLines(payload.volumesText);
-          const allVols = [...volSpecs, ...(includeVol ? [`${volName}:/data`] : [])];
-          const envObj = parseEnvText(payload.environmentText);
-          const depObj = parseDependsText(payload.dependsText);
-          const hc = payload.healthcheck
-            ? {
-                test: ['CMD-SHELL', String(payload.healthcheck.test || '').trim()],
-                ...(payload.healthcheck.interval?.trim()
-                  ? { interval: String(payload.healthcheck.interval).trim() }
-                  : {}),
-                ...(payload.healthcheck.timeout?.trim()
-                  ? { timeout: String(payload.healthcheck.timeout).trim() }
-                  : {}),
-                ...(payload.healthcheck.retries?.trim()
-                  ? { retries: Number(payload.healthcheck.retries) }
-                  : {}),
-                ...(payload.healthcheck.startPeriod?.trim()
-                  ? { start_period: String(payload.healthcheck.startPeriod).trim() }
-                  : {}),
-              }
-            : undefined;
-
-          const svcDef = includeSvc
-            ? {
-                ...(sourceMode === 'build'
-                  ? {
-                      build: {
-                        context: String(payload.buildContext || '.').trim() || '.',
-                        dockerfile:
-                          String(payload.buildDockerfile || defaultDockerfile).trim() ||
-                          defaultDockerfile,
-                      },
-                      ...(payload.image?.trim() ? { image: String(payload.image).trim() } : {}),
-                    }
-                  : {
-                      image:
-                        String(payload.image || 'docker.io/library/nginx:alpine').trim() ||
-                        'docker.io/library/nginx:alpine',
-                    }),
-                ...(payload.containerName?.trim()
-                  ? { container_name: String(payload.containerName).trim() }
-                  : {}),
-                ...(ports.length > 0 ? { ports } : {}),
-                ...(envObj ? { environment: envObj } : {}),
-                ...(allVols.length > 0 ? { volumes: allVols } : {}),
-                ...(includeNet ? { networks: [netName] } : {}),
-                ...(depObj ? { depends_on: depObj } : {}),
-                ...(payload.commandText?.trim()
-                  ? { command: String(payload.commandText).trim() }
-                  : {}),
-                ...(payload.restartPolicy?.trim()
-                  ? { restart: String(payload.restartPolicy).trim() }
-                  : {}),
-                ...(hc ? { healthcheck: hc } : {}),
-              }
-            : {};
-
-          const namedVolumes = Array.from(
-            new Set([
-              ...volSpecs.map(namedVolumeFromMount).filter((v): v is string => Boolean(v)),
-              ...(includeVol ? [volName] : []),
-            ])
-          );
-
-          const doc = {
-            services: includeSvc ? { [svcName]: svcDef } : {},
-            ...(includeNet ? { networks: { [netName]: { driver: 'bridge' } } } : {}),
-            ...(namedVolumes.length > 0
-              ? { volumes: Object.fromEntries(namedVolumes.map((v) => [v, {}])) }
-              : {}),
-          };
-
-          fs.writeFileSync(targetPath, yamlService.stringify(doc), 'utf-8');
+          fs.writeFileSync(targetPath, yaml, { encoding: 'utf-8', flag: 'wx' });
           activeComposeFile = targetPath;
-          await fileDetector.registerFile(targetPath);
+          try {
+            await fileDetector.registerFile(targetPath);
+          } catch (error) {
+            throw new Error(`The file was created at ${targetPath}, but registration failed: ${error instanceof Error ? error.message : String(error)}`);
+          }
           statusProvider.startPolling(targetPath, getConfig().pollingInterval);
           sendComposeState();
+          studioPanel.postMessage({ command: A.COMPOSE_CREATE_SAVED, requestId: msg.requestId });
           vscode.window.showInformationMessage(
             bt('composeCreatedToast', { file: path.basename(targetPath) })
           );
@@ -1498,6 +1684,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           if (!composeFile) {
             break;
           }
+          readComposeEditBase(composeFile, { ...payload, baseYaml: payload.rawYaml });
           await notifyResult('start', `${engineLabel} Compose Up`, () =>
             podman.composeUp(composeFile, payload)
           );
@@ -1508,6 +1695,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           if (!composeFile) {
             break;
           }
+          assertComposeProjectContext(composeFile, payload, true);
           await notifyResult('stop', `${engineLabel} Compose Stop`, () =>
             podman.composeStop(composeFile, payload?.services)
           );
@@ -1518,6 +1706,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           if (!composeFile) {
             break;
           }
+          assertComposeProjectContext(composeFile, payload, true);
           const services = Array.isArray(payload?.services) ? payload.services : [];
           if (!(await confirmPodmanAction(
             services.length > 0
@@ -1527,8 +1716,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           ))) {
             break;
           }
+          assertComposeProjectContext(composeFile, payload, true);
           if (Array.isArray(payload?.services) && payload.services.length > 0) {
-            const doc = yamlService.parse(fs.readFileSync(composeFile, 'utf-8'));
+            const doc = podman.hasCustomComposeProject(composeFile)
+              ? await podman.resolveComposeDocument(composeFile)
+              : yamlService.parse(fs.readFileSync(composeFile, 'utf-8'));
+            assertComposeProjectContext(composeFile, payload, true);
             await notifyResult('down', `Remove Service ${payload.services.join(', ')}`, () =>
               podman.composeRemoveServices(composeFile, payload.services, doc)
             );
@@ -1544,6 +1737,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           if (!composeFile) {
             break;
           }
+          assertComposeProjectContext(composeFile, payload);
           await notifyResult('restart', `${engineLabel} Compose Restart`, () =>
             podman.composeRestart(composeFile, payload?.services)
           );
@@ -1554,8 +1748,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           if (!composeFile) {
             break;
           }
-          await notifyResult('build', `${engineLabel} Compose Build & Up`, () =>
-            podman.composeBuild(composeFile, payload?.services)
+          readComposeEditBase(composeFile, { ...payload, baseYaml: payload.rawYaml });
+          await notifyResult(payload.noCache ? 'rebuild' : 'build', `${engineLabel} Compose ${payload.noCache ? 'Rebuild (no cache)' : 'Build'}`, () =>
+            podman.composeBuild(composeFile, payload?.services, undefined, { noCache: payload.noCache === true }),
+            { includeOutput: true }
+          );
+          await refreshAllStudioData();
+          break;
+        }
+        case M.STACK_BUILD_UP: {
+          if (!composeFile) {
+            break;
+          }
+          readComposeEditBase(composeFile, { ...payload, baseYaml: payload.rawYaml });
+          await notifyResult('build-up', `${engineLabel} Compose Build & Up`, () =>
+            podman.composeBuildUp(composeFile, payload?.services),
+            { includeOutput: true }
           );
           await refreshAllStudioData();
           break;
@@ -1564,6 +1772,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           if (!composeFile || !payload.service || payload.replicas === undefined) {
             break;
           }
+          assertComposeProjectContext(composeFile, payload);
           const replicas = typeof payload.replicas === 'number'
             ? payload.replicas
             : typeof payload.replicas === 'string' && /^\d+$/.test(payload.replicas.trim())
@@ -1582,7 +1791,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             }
             const initialSettings = getPodmanComposeSettingsKey();
             expectedComposeContent = fs.readFileSync(composeFile, 'utf-8');
-            const doc = yamlService.parse(expectedComposeContent);
+            const doc = podman.hasCustomComposeProject(composeFile)
+              ? await podman.resolveComposeDocument(composeFile)
+              : yamlService.parse(expectedComposeContent);
+            assertComposeProjectContext(composeFile, payload);
             if (!doc.services || !Object.prototype.hasOwnProperty.call(doc.services, payload.service)) {
               throw new Error('The requested Compose service no longer exists. Refresh the project.');
             }
@@ -1594,6 +1806,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 fs.readFileSync(composeFile, 'utf-8') !== expectedComposeContent) {
               throw new Error('Compose settings or the file changed; refresh before scaling.');
             }
+            assertComposeProjectContext(composeFile, payload);
             if (current.length > replicas && !(await confirmPodmanAction(
               bt('confirmScaleDown', {
                 service: String(payload.service),
@@ -1608,6 +1821,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 fs.readFileSync(composeFile, 'utf-8') !== expectedComposeContent) {
               throw new Error('Compose settings or the file changed; refresh before scaling.');
             }
+            assertComposeProjectContext(composeFile, payload);
           }
           await notifyResult('scale', `Scale ${payload.service}`, () =>
             podman.composeScale(
@@ -1621,79 +1835,92 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           if (!composeFile || !payload.service) {
             break;
           }
+          assertComposeProjectContext(composeFile, payload, true);
           const svc = String(payload.service);
-          logProvider.clearHistory(svc);
+          if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(svc) ||
+              (payload.containerId && !/^[a-f0-9]{64}$/i.test(payload.containerId))) {
+            throw new Error('Invalid Compose service or replica for logs.');
+          }
+          const containerId = payload.containerId ? String(payload.containerId) : undefined;
+          const key = composeLogKey(composeFile, engine, payload.projectRevision, svc, containerId);
+          const entries = logProvider.getHistory(key);
           studioPanel.postMessage({
             command: A.LOG_HISTORY,
-            payload: { service: svc, entries: [] },
+            payload: { target: key, entries },
           });
-          await logProvider.startComposeStreaming(composeFile, svc);
+          await logProvider.startComposeStreaming(composeFile, svc, {
+            key, containerId,
+          });
           break;
         }
         case M.LOGS_STOP: {
-          if (payload.service) {
-            logProvider.stopStreaming(String(payload.service));
+          if (payload.file && payload.engine && payload.projectRevision && payload.service) {
+            logProvider.stopStreaming(composeLogKey(
+              String(payload.file), String(payload.engine), String(payload.projectRevision),
+              String(payload.service), payload.containerId ? String(payload.containerId) : undefined
+            ));
+          }
+          break;
+        }
+        case M.LOGS_CLEAR: {
+          if (payload.file && payload.engine && payload.projectRevision && payload.service) {
+            logProvider.clearHistory(composeLogKey(
+              String(payload.file), String(payload.engine), String(payload.projectRevision),
+              String(payload.service), payload.containerId ? String(payload.containerId) : undefined
+            ));
           }
           break;
         }
         case M.SERVICE_ADD: {
-          if (!composeFile || !payload.name) {
-            break;
+          if (!composeFile || !payload.spec) {
+            throw new Error('The active Compose project or service specification is unavailable.');
           }
-          const raw = fs.readFileSync(composeFile, 'utf-8');
-          const doc = yamlService.parse(raw);
-          const next = yamlService.addService(doc, payload);
-          fs.writeFileSync(composeFile, yamlService.stringify(next), 'utf-8');
-          sendComposeState();
+          assertVisualComposeEditAllowed(composeFile);
+          const raw = readComposeEditBase(composeFile, payload);
+          if (!Array.isArray(payload.spec.services) || payload.spec.services.length !== 1) {
+            throw new Error('Exactly one service is required when adding to an existing project.');
+          }
+          const current = yamlService.parse(raw);
+          const generated = buildComposeDocument(payload.spec, current.services);
+          const [name, definition] = Object.entries(generated.services)[0];
+          const next = yamlService.addServiceToYaml(raw, { name, ...definition }, generated);
+          saveComposeEdit(composeFile, payload, next, msg.requestId);
           break;
         }
         case M.SERVICE_UPDATE: {
           if (!composeFile || !payload.name) {
-            break;
+            throw new Error('The active Compose project or service is unavailable.');
           }
+          assertVisualComposeEditAllowed(composeFile);
+          const raw = readComposeEditBase(composeFile, payload);
           await ensureServiceStopped(payload.name);
-          const raw = fs.readFileSync(composeFile, 'utf-8');
-          const doc = yamlService.parse(raw);
-          const next = payload.definitionYaml
-            ? {
-                ...doc,
-                services: {
-                  ...doc.services,
-                  [payload.name]: yamlService.parseServiceFragment(
-                    payload.name,
-                    payload.definitionYaml
-                  ),
-                },
-              }
-            : yamlService.updateService(doc, payload.name, payload.changes || {});
-          fs.writeFileSync(composeFile, yamlService.stringify(next), 'utf-8');
-          sendComposeState();
+          const next = yamlService.updateServiceInYaml(raw, payload.name, payload.definitionYaml);
+          saveComposeEdit(composeFile, payload, next, msg.requestId);
           break;
         }
         case M.SERVICE_REMOVE: {
           if (!composeFile || !payload.name) {
             break;
           }
+          assertVisualComposeEditAllowed(composeFile);
+          const raw = readComposeEditBase(composeFile, payload);
           await ensureServiceStopped(payload.name);
-          const raw = fs.readFileSync(composeFile, 'utf-8');
-          const doc = yamlService.parse(raw);
-          const next = yamlService.removeService(doc, payload.name);
-          fs.writeFileSync(composeFile, yamlService.stringify(next), 'utf-8');
-          sendComposeState();
+          const next = yamlService.removeServiceFromYaml(raw, payload.name);
+          saveComposeEdit(composeFile, payload, next, msg.requestId);
           break;
         }
         case M.COMPOSE_RAW_SAVE: {
           if (!composeFile || typeof payload.rawYaml !== 'string') {
             break;
           }
+          readComposeEditBase(composeFile, payload);
           await ensureAllServicesStopped();
           const issues = yamlService.validate(payload.rawYaml);
           const fatal = issues.find((i) => i.severity === 'error');
           if (fatal) {
             throw new Error(`YAML Error: ${fatal.message}`);
           }
-          fs.writeFileSync(composeFile, payload.rawYaml, 'utf-8');
-          sendComposeState();
+          saveComposeEdit(composeFile, payload, payload.rawYaml, msg.requestId);
           studioPanel.postMessage({
             command: A.NOTIFICATION,
             payload: { type: 'success', message: bt('yamlSavedToast') },
@@ -1704,57 +1931,50 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           if (!composeFile || !payload.name) {
             break;
           }
-          const doc = yamlService.parse(fs.readFileSync(composeFile, 'utf-8'));
-          doc.networks = {
-            ...(doc.networks ?? {}),
-            [payload.name]: {
-              ...(payload.driver ? { driver: payload.driver } : {}),
-              ...(payload.external !== undefined ? { external: Boolean(payload.external) } : {}),
-            },
-          };
-          fs.writeFileSync(composeFile, yamlService.stringify(doc), 'utf-8');
-          sendComposeState();
+          assertVisualComposeEditAllowed(composeFile);
+          const raw = readComposeEditBase(composeFile, payload);
+          const next = yamlService.addResourceToYaml(raw, 'networks', payload.name, {
+            ...(payload.driver ? { driver: payload.driver } : {}),
+            ...(payload.external !== undefined ? { external: Boolean(payload.external) } : {}),
+          });
+          saveComposeEdit(composeFile, payload, next, msg.requestId);
           break;
         }
         case M.COMPOSE_NETWORK_REMOVE: {
           if (!composeFile || !payload.name) {
             break;
           }
-          const doc = yamlService.parse(fs.readFileSync(composeFile, 'utf-8'));
-          const { [payload.name]: _rem, ...rest } = doc.networks ?? {};
-          doc.networks = rest;
-          fs.writeFileSync(composeFile, yamlService.stringify(doc), 'utf-8');
-          sendComposeState();
+          assertVisualComposeEditAllowed(composeFile);
+          const raw = readComposeEditBase(composeFile, payload);
+          const next = yamlService.removeResourceFromYaml(raw, 'networks', payload.name);
+          saveComposeEdit(composeFile, payload, next, msg.requestId);
           break;
         }
         case M.COMPOSE_VOLUME_ADD: {
           if (!composeFile || !payload.name) {
             break;
           }
-          const doc = yamlService.parse(fs.readFileSync(composeFile, 'utf-8'));
-          doc.volumes = {
-            ...(doc.volumes ?? {}),
-            [payload.name]: {
-              ...(payload.driver ? { driver: payload.driver } : {}),
-              ...(payload.external !== undefined ? { external: Boolean(payload.external) } : {}),
-            },
-          };
-          fs.writeFileSync(composeFile, yamlService.stringify(doc), 'utf-8');
-          sendComposeState();
+          assertVisualComposeEditAllowed(composeFile);
+          const raw = readComposeEditBase(composeFile, payload);
+          const next = yamlService.addResourceToYaml(raw, 'volumes', payload.name, {
+            ...(payload.driver ? { driver: payload.driver } : {}),
+            ...(payload.external !== undefined ? { external: Boolean(payload.external) } : {}),
+          });
+          saveComposeEdit(composeFile, payload, next, msg.requestId);
           break;
         }
         case M.COMPOSE_VOLUME_REMOVE: {
           if (!composeFile || !payload.name) {
             break;
           }
-          const doc = yamlService.parse(fs.readFileSync(composeFile, 'utf-8'));
-          const { [payload.name]: _rem, ...rest } = doc.volumes ?? {};
-          doc.volumes = rest;
-          fs.writeFileSync(composeFile, yamlService.stringify(doc), 'utf-8');
-          sendComposeState();
+          assertVisualComposeEditAllowed(composeFile);
+          const raw = readComposeEditBase(composeFile, payload);
+          const next = yamlService.removeResourceFromYaml(raw, 'volumes', payload.name);
+          saveComposeEdit(composeFile, payload, next, msg.requestId);
           break;
         }
         case M.COMPOSE_GET: {
+          resolvedCompose = undefined;
           sendComposeState();
           break;
         }
@@ -1986,6 +2206,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
       }
     } catch (err: unknown) {
+      if (msg.command === M.COMPOSE_FILE_CREATE && msg.requestId) {
+        studioPanel.postMessage({ command: A.COMPOSE_CREATE_FAILED, requestId: msg.requestId });
+      }
+      if (msg.command === M.COMPOSE_OPTIONS_SAVE && msg.requestId) {
+        studioPanel.postMessage({ command: A.COMPOSE_OPTIONS_FAILED, requestId: msg.requestId });
+      }
+      if ((msg.command === M.SERVICE_ADD || msg.command === M.SERVICE_UPDATE) && msg.requestId) {
+        studioPanel.postMessage({ command: A.COMPOSE_EDIT_FAILED, requestId: msg.requestId });
+      }
       reportError(err);
     }
   });

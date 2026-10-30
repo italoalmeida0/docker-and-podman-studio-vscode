@@ -4,6 +4,23 @@ All notable changes to **Docker and Podman Studio** will be documented in this f
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-10-30
+
+### Added
+- Create multiple services in the Compose wizard and add image- or build-based services to an existing project.
+- Configure ordered Compose files, profiles, and an environment file, with provider-resolved project details.
+- Build individual or selected services, rebuild without cache, or explicitly build and start them.
+- Follow logs from all replicas or one container, pause the display, and replay retained timestamped lines.
+
+### Changed
+- Edit common service fields visually or switch to YAML while preserving untouched advanced fields, comments, and anchors.
+- Expanded topology and replica details, with sensitive environment values masked by default in selected views.
+
+### Fixed
+- Protected drafts against external changes, unsaved editors, project changes, and active services, including those in unselected profiles.
+- Podman batch removal now removes selected dependent containers before their dependencies without deleting unselected containers.
+- Fixed creation of missing YAML resource sections and duplicate Compose file choices on Windows.
+
 ## [1.2.0] - 2026-10-30
 
 ### Added

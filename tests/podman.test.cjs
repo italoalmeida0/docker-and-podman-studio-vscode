@@ -44,6 +44,53 @@ test('does not present an exposed-only port as a published host port', () => {
   assert.equal(display, '8080/tcp');
 });
 
+test('container summaries expose health and exit code only when available', async () => {
+  const service = new PodmanService();
+  service.runEngineCommand = async () => ok(JSON.stringify([
+    { Id: 'a'.repeat(64), Names: ['healthy'], State: 'running', Status: 'Up (healthy)' },
+    { Id: 'b'.repeat(64), Names: ['failed'], State: 'exited', ExitCode: 42, Status: 'Exited (42)' },
+    { Id: 'c'.repeat(64), Names: ['stopped'], State: 'exited', Status: 'Exited' },
+  ]));
+  const containers = await service.listAllContainers();
+  assert.equal(containers[0].health, 'healthy');
+  assert.equal(containers[0].exitCode, undefined);
+  assert.equal(containers[1].exitCode, 42);
+  assert.equal(containers[2].exitCode, undefined);
+});
+
+test('Docker Compose status uses provider project IDs and carries replica details', async () => {
+  const service = new PodmanService();
+  config.engine = 'docker';
+  const file = path.resolve('fixtures', 'compose.yaml');
+  const ids = ['a'.repeat(64), 'b'.repeat(64)];
+  const calls = [];
+  service.runComposeCommand = async (_file, args) => {
+    calls.push(args);
+    return ok(ids.map((id) => id.slice(0, 12)).join('\n'));
+  };
+  service.runEngineCommand = async () => ok(ids.map((id, index) => JSON.stringify({
+    ID: id,
+    Names: `project-app-${index + 1}`,
+    Image: 'example',
+    State: index ? 'exited' : 'running',
+    Status: index ? 'Exited (7) 2 minutes ago' : 'Up 2 minutes (healthy)',
+    Ports: index ? '' : '0.0.0.0:8080->80/tcp',
+    Labels: {
+      'com.docker.compose.project': 'project',
+      'com.docker.compose.service': 'app',
+      'com.docker.compose.container-number': String(index + 1),
+      'com.docker.compose.project.config_files': file,
+    },
+  })).join('\n'));
+  const statuses = await service.composePs(file, { name: 'project', services: { app: {} } });
+  assert.deepEqual(calls, [['ps', '--all', '-q']]);
+  assert.equal(statuses.length, 2);
+  assert.equal(statuses[0].health, 'healthy');
+  assert.equal(statuses[0].ports[0].host, '8080');
+  assert.equal(statuses[1].replica, 2);
+  assert.equal(statuses[1].exitCode, 7);
+});
+
 test('does not start a machine after its stop failed', async () => {
   const service = new PodmanService();
   const calls = [];
@@ -867,8 +914,45 @@ test('scaled Compose logs follow all replicas using explicit container IDs', asy
   assert.ok(invocations.every((invocation) => invocation.engine === 'podman'));
   assert.ok(invocations.every((invocation) => invocation.value.bin === 'podman'));
   assert.deepEqual(invocations.map((invocation) => invocation.value.args), ids.slice(0, 2).map((id) =>
-    ['logs', '-f', '--tail', '42', id]
+    ['logs', '-f', '--timestamps', '--tail', '42', id]
   ));
+});
+
+test('replica log selection uses the verified full ID and rejects an unrelated container', async () => {
+  const service = new PodmanService();
+  const id = 'a'.repeat(64);
+  service.getPodmanComposeTargets = async () => ({
+    containers: [{ fullId: id, service: 'app', name: 'app-1' }],
+    ensureUnchanged() {},
+  });
+  const calls = [];
+  service.spawnComposeLogProcess = async (value) => { calls.push(value.args); return {}; };
+  await service.streamComposeLogs(composeFixture, 'app', 20, undefined, id);
+  assert.deepEqual(calls, [['logs', '-f', '--timestamps', '--tail', '20', id]]);
+  await assert.rejects(
+    () => service.streamComposeLogs(composeFixture, 'app', 20, undefined, 'b'.repeat(64)),
+    /replica no longer exists/i
+  );
+  assert.equal(calls.length, 1);
+});
+
+test('Compose log replay uses stable replica streams and passes the original timestamp', async () => {
+  const service = new PodmanService();
+  const id = 'a'.repeat(64);
+  service.getPodmanComposeTargets = async () => ({
+    containers: [{ fullId: id, service: 'app', name: 'app-1' }],
+    ensureUnchanged() {},
+  });
+  const calls = [];
+  service.spawnComposeLogProcess = async (value) => { calls.push(value.args); return {}; };
+  const since = '2024-01-02T03:04:05.123456789Z';
+  await service.streamComposeLogs(composeFixture, 'app', 0, undefined, id, since);
+  await service.streamComposeLogs(composeFixture, 'app', 0, undefined, undefined, since);
+  assert.deepEqual(calls[0], ['logs', '-f', '--timestamps', '--since', since, id]);
+  assert.deepEqual(calls[1], ['logs', '-f', '--timestamps', '--since', since, id]);
+  service.getPodmanComposeTargets = async () => ({ containers: [] });
+  await service.streamComposeLogs(composeFixture, 'app', 0, undefined, undefined, since);
+  assert.deepEqual(calls[2].slice(-6), ['logs', '-f', '--timestamps', '--since', since, 'app']);
 });
 
 test('a failed replica log startup terminates every process that already started', async () => {
@@ -913,6 +997,33 @@ test('Compose Down cleans replicas left by the provider without removing orphan 
     { engine: ['container', 'stop', app2.fullId], target: 'podman' },
     { engine: ['container', 'rm', app2.fullId], target: 'podman' },
     { provider: ['down'], project: 'project' },
+  ]);
+});
+
+test('Compose Down removes leftover dependents before their dependencies', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'studio-down-dependencies-'));
+  const file = path.join(dir, 'compose.yaml');
+  fs.writeFileSync(file, 'services:\n  app: {}\n  worker:\n    depends_on: [app]\n');
+  t.after(() => { fs.unlinkSync(file); fs.rmdirSync(dir); });
+  const service = new PodmanService();
+  const app = { fullId: 'a'.repeat(64), name: 'app-1', service: 'app', replica: 1 };
+  const worker = { fullId: 'b'.repeat(64), name: 'worker-1', service: 'worker', replica: 1 };
+  let queries = 0;
+  service.composePs = async () => ++queries < 3 ? [app, worker] : [];
+  service.runComposeCommand = async (_file, args) =>
+    args[0] === 'config' ? ok(fs.readFileSync(file, 'utf8')) : ok();
+  const calls = [];
+  service.runEngineCommand = async (args) => {
+    calls.push(args);
+    if (args[1] === 'inspect') return ok(`${app.fullId} []\n${worker.fullId} ["${app.fullId}"]`);
+    return ok();
+  };
+  assert.equal((await service.composeDown(file)).success, true);
+  assert.deepEqual(calls, [
+    ['container', 'inspect', '--format', '{{.Id}} {{json .Dependencies}}', app.fullId, worker.fullId],
+    ['container', 'stop', worker.fullId],
+    ['container', 'stop', app.fullId],
+    ['container', 'rm', worker.fullId, app.fullId],
   ]);
 });
 

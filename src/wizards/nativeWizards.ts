@@ -237,7 +237,7 @@ export class NativeCommandsManager implements vscode.Disposable {
                 ? await this.podman.composeDown(file)
                 : action === 'restart'
                   ? await this.podman.composeRestart(file)
-                  : await this.podman.composeBuild(file);
+                  : await this.podman.composeBuildUp(file);
 
       if (!res.success) {
         await showErrorWithCopy(

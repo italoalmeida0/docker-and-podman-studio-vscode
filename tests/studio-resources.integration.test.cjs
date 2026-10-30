@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { config, loadService, vscode } = require('./podman-harness.cjs');
+const { config, loadModule, loadService, vscode } = require('./podman-harness.cjs');
 const { composeTmpfs, imageVolumeDestinations, tmpfsMounts } = require('./podman-test-util.cjs');
 
 const enabled = process.env.PODMAN_INTEGRATION_TESTS === '1';
@@ -174,6 +174,7 @@ test('real Podman removes selected Compose replicas and leaves other services ru
         `    image: ${JSON.stringify(image)}`,
         '    command: ["sh", "-c", "sleep 900"]',
         '    stop_grace_period: 1s',
+        ...(name === 'worker' ? ['    depends_on: [app]'] : []),
         ...composeTmpfs(destinations),
       ]),
       '',
@@ -187,6 +188,13 @@ test('real Podman removes selected Compose replicas and leaves other services ru
     const before = await service.composePs(file, doc);
     assert.equal(before.filter((container) => container.service === 'app').length, 2);
     assert.equal(before.find((container) => container.service === 'worker')?.status, 'exited');
+    const worker = before.find((container) => container.service === 'worker');
+    const dependencies = succeeded(await service.runEngineCommand([
+      'container', 'inspect', '--format', '{{json .Dependencies}}', worker.fullId,
+    ]));
+    const appIds = new Set(before.filter((container) => container.service === 'app').map((container) => container.fullId));
+    assert.ok(JSON.parse(dependencies.stdout).some((containerId) => appIds.has(containerId)),
+      'the worker must depend on one of the selected app containers');
 
     const result = succeeded(await service.composeRemoveServices(file, ['app', 'worker'], doc, content));
     assert.match(result.stdout, /app/);
@@ -202,6 +210,103 @@ test('real Podman removes selected Compose replicas and leaves other services ru
       assert.deepEqual(JSON.parse(remaining.stdout), []);
     }
     if (fs.existsSync(file)) fs.unlinkSync(file);
+    fs.rmdirSync(dir);
+  }
+});
+
+test('real Podman uses the same overrides, profiles and env file for configuration and operations', {
+  skip: !enabled && 'Set PODMAN_INTEGRATION_TESTS=1 and PODMAN_TEST_IMAGE to a local image.',
+  timeout: 360_000,
+}, async () => {
+  const image = process.env.PODMAN_TEST_IMAGE;
+  assert.ok(image, 'PODMAN_TEST_IMAGE must name an image already available locally');
+  const service = setup();
+  const root = process.env.PODMAN_TEST_ROOT || os.tmpdir();
+  const dir = fs.mkdtempSync(path.join(root, 'studio-compose-options-'));
+  const base = path.join(dir, 'compose.yaml');
+  const first = path.join(dir, 'first.yaml');
+  const second = path.join(dir, 'second.yaml');
+  const env = path.join(dir, 'project.env');
+  const project = `studiooptions${crypto.randomBytes(6).toString('hex')}`;
+  let attemptedUp = false;
+  try {
+    succeeded(await service.runEngineCommand(['image', 'exists', image]));
+    const existing = succeeded(await service.runEngineCommand([
+      'ps', '-a', '--filter', `label=com.docker.compose.project=${project}`, '--format', 'json',
+    ]));
+    assert.deepEqual(JSON.parse(existing.stdout), []);
+    const destinations = await imageVolumeDestinations(service, image);
+    fs.writeFileSync(base, [
+      `name: ${project}`,
+      'services:',
+      '  app:',
+      `    image: ${JSON.stringify(image)}`,
+      '    network_mode: none',
+      '    command: ["sh", "-c", "sleep 900"]',
+      '    environment:',
+      '      STUDIO_STAGE: ${STUDIO_STAGE}',
+      '    stop_grace_period: 1s',
+      ...composeTmpfs(destinations),
+      '',
+    ].join('\n'));
+    fs.writeFileSync(first, [
+      'services:',
+      '  app:',
+      '    environment:',
+      '      STUDIO_ORDER: first',
+      '  worker:',
+      `    image: ${JSON.stringify(image)}`,
+      '    profiles: [jobs]',
+      '    network_mode: none',
+      '    command: ["sh", "-c", "sleep 900"]',
+      '    stop_grace_period: 1s',
+      ...composeTmpfs(destinations),
+      '',
+    ].join('\n'));
+    fs.writeFileSync(second, 'services:\n  app:\n    environment:\n      STUDIO_ORDER: second\n');
+    fs.writeFileSync(env, 'STUDIO_STAGE=isolated-test\n');
+    service.setComposeProjectOptions(base, {
+      files: [base, first, second], profiles: ['jobs'], envFile: env,
+    });
+    const resolved = await service.resolveComposeDocument(base);
+    assert.equal(resolved.services.app.environment.STUDIO_STAGE, 'isolated-test');
+    assert.equal(resolved.services.app.environment.STUDIO_ORDER, 'second');
+    assert.ok(resolved.services.worker);
+
+    attemptedUp = true;
+    succeeded(await service.composeUp(base));
+    const running = await service.composePs(base, resolved);
+    assert.deepEqual(running.map((item) => item.service).sort(), ['app', 'worker']);
+    assert.ok(running.every((item) => item.status === 'running'));
+    succeeded(await service.composeStop(base, ['app']));
+    const stopped = await service.composePs(base, resolved);
+    assert.equal(stopped.find((item) => item.service === 'app')?.status, 'exited');
+    assert.equal(stopped.find((item) => item.service === 'worker')?.status, 'running');
+
+    service.setComposeProjectOptions(base, {
+      files: [base, first, second], profiles: [], envFile: env,
+    });
+    const visible = await service.composePs(base);
+    const all = await service.listAllContainers();
+    const { composeEditStatuses } = loadModule('src/services/composeEdit.ts');
+    const safety = composeEditStatuses(service.getComposeProjectWatchedFiles(base), visible, all);
+    assert.ok(safety.some((item) => item.service === 'worker' && item.status === 'running'),
+      'edit safety must include a running service from an inactive profile');
+  } finally {
+    if (attemptedUp) {
+      service.setComposeProjectOptions(base, {
+        files: [base, first, second], profiles: ['jobs'], envFile: env,
+      });
+      const cleanup = await service.composeDown(base, { projectName: project });
+      if (!cleanup.success) throw new Error(`Failed to clean up isolated project ${project}: ${cleanup.stderr}`);
+      const remaining = succeeded(await service.runEngineCommand([
+        'ps', '-a', '--filter', `label=com.docker.compose.project=${project}`, '--format', 'json',
+      ]));
+      assert.deepEqual(JSON.parse(remaining.stdout), []);
+    }
+    for (const target of [base, first, second, env]) {
+      if (fs.existsSync(target)) fs.unlinkSync(target);
+    }
     fs.rmdirSync(dir);
   }
 });
@@ -260,8 +365,21 @@ test('real Podman builds only the selected Compose services', {
       '',
     ].join('\n'));
 
-    attemptedUp = true;
     succeeded(await service.composeBuild(file, ['app', 'worker']));
+    const beforeUp = await service.composePs(file, {
+      name: project, services: { app: {}, worker: {}, keep: {} },
+    });
+    assert.deepEqual(beforeUp, []);
+    assert.equal(await imageExists(images.app), true);
+    assert.equal(await imageExists(images.worker), true);
+    assert.equal(await imageExists(images.keep), false);
+
+    succeeded(await service.composeBuild(file, ['app'], undefined, { noCache: true }));
+    assert.deepEqual(await service.composePs(file, {
+      name: project, services: { app: {}, worker: {}, keep: {} },
+    }), []);
+    attemptedUp = true;
+    succeeded(await service.composeBuildUp(file, ['app', 'worker']));
     const statuses = await service.composePs(file, {
       name: project, services: { app: {}, worker: {}, keep: {} },
     });
