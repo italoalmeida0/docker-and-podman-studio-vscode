@@ -74,7 +74,7 @@ export const DashboardPage: React.FC = () => {
       {/* Header */}
       <div className="studio-page-header px-3 sm:px-6 py-4 border-b border-panel-border bg-panel-card flex items-center justify-between gap-4 flex-wrap">
         <div>
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2.5">
             <h1 className="text-[17px] font-semibold tracking-tight text-text-primary">
               {fmt(t.dashboard.title, { engine: engineLabel })}
             </h1>
@@ -90,7 +90,7 @@ export const DashboardPage: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
           <ActionPillButton
             label={t.dashboard.openComposeBtn}
             variant="brand"
@@ -201,7 +201,7 @@ export const DashboardPage: React.FC = () => {
                   >
                     <div className="space-y-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-medium text-sm text-text-primary font-mono">
+                        <span className="break-all font-medium text-sm text-text-primary font-mono">
                           {m.name}
                         </span>
                         {m.default && (
@@ -245,7 +245,7 @@ export const DashboardPage: React.FC = () => {
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2">
+                    <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
                       <SmallActionButton
                         label={t.common.start}
                         accent
@@ -347,7 +347,7 @@ export const DashboardPage: React.FC = () => {
         <div className="grid grid-cols-2 gap-4">
           {/* Engine & Host Info */}
           <div className="bg-panel-card border border-panel-border rounded-xl p-5 shadow-card space-y-4">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-sm font-semibold tracking-tight text-text-primary">
                 {fmt(t.dashboard.engineInfoTitle, { engine: engineLabel })}
               </h2>
@@ -400,7 +400,7 @@ export const DashboardPage: React.FC = () => {
           {/* Storage Allocation (Apple macOS Storage-style bars + metrics) */}
           <div className="bg-panel-card border border-panel-border rounded-xl p-5 shadow-card space-y-4 flex flex-col justify-between">
             <div className="space-y-3.5">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <h2 className="text-sm font-semibold tracking-tight text-text-primary">
                   {fmt(t.dashboard.diskUsageTitle, { cmd: engineCmd })}
                 </h2>
@@ -429,14 +429,14 @@ export const DashboardPage: React.FC = () => {
                         : 'bg-violet-500/80';
                     return (
                       <div key={row.type} className="px-4 py-2.5 space-y-1.5">
-                        <div className="flex items-center justify-between text-xs">
-                          <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                          <div className="flex flex-wrap items-center gap-2">
                             <span className="font-medium text-text-primary">{row.type}</span>
                             <span className="text-[11px] text-text-muted font-mono tabular-nums">
                               {row.active}/{row.total}
                             </span>
                           </div>
-                          <div className="flex items-center gap-2.5 font-mono tabular-nums">
+                          <div className="flex flex-wrap items-center gap-2.5 font-mono tabular-nums">
                             <span className="text-text-primary font-medium">{row.size}</span>
                             {row.reclaimable && (
                               <span className="text-[11px] text-text-secondary">

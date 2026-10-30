@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Download,
   FolderOpen,
@@ -24,6 +24,8 @@ import { PodmanImage, useStudioStore } from '../store';
 import { useActionRequest } from '../useActionRequest';
 import { useVsCodeMessaging } from '../vscode';
 
+const COMPACT_IMAGES_WIDTH = 760;
+
 function imageRemovalName(image: PodmanImage): string {
   return image.dangling ? image.fullId || image.id : `${image.repository}:${image.tag}`;
 }
@@ -46,6 +48,8 @@ export const ImagesPage: React.FC = () => {
   const [pullName, setPullName] = useState('');
   const [search, setSearch] = useState('');
   const [filterMode, setFilterMode] = useState<'all' | 'inUse' | 'unused' | 'dangling'>('all');
+  const imageLayoutRef = useRef<HTMLDivElement>(null);
+  const [compactImages, setCompactImages] = useState(() => window.innerWidth <= COMPACT_IMAGES_WIDTH);
 
   // Build Modal
   const [showBuildModal, setShowBuildModal] = useState(false);
@@ -76,6 +80,16 @@ export const ImagesPage: React.FC = () => {
       setBuildContext(dockerfileSelection.contextDir);
     }
   }, [dockerfileSelection]);
+
+  useLayoutEffect(() => {
+    const layout = imageLayoutRef.current;
+    if (!layout) return;
+    const updateLayout = () => setCompactImages(layout.clientWidth <= COMPACT_IMAGES_WIDTH);
+    updateLayout();
+    const observer = new ResizeObserver(updateLayout);
+    observer.observe(layout);
+    return () => observer.disconnect();
+  }, []);
 
   const busy = Boolean(operationInProgress);
   const inUseCount = images.filter((i) => i.inUse).length;
@@ -130,6 +144,60 @@ export const ImagesPage: React.FC = () => {
     setPushTargetImage(img);
     setPushDestTag(defReg ? `${defReg.replace(/\/$/, '')}/${shortName}:${img.tag || 'latest'}` : sourceRef);
   };
+
+  const imageSelection = (img: PodmanImage) => (
+    <input
+      type="checkbox"
+      className="shrink-0"
+      aria-label={fmt(t.common.selectResource, { name: imageRemovalName(img) })}
+      checked={selection.selectedIds.has(imageSelectionKey(img))}
+      disabled={busy}
+      onChange={() => selection.toggle(imageSelectionKey(img))}
+    />
+  );
+  const imageStatus = (img: PodmanImage) => (
+    <span className={`inline-flex min-w-0 max-w-full px-2 py-0.5 text-[10px] rounded-full border ${
+      img.inUse
+        ? 'bg-green-500/15 text-accent-green border-accent-green'
+        : img.dangling
+        ? 'bg-yellow-500/15 text-accent-orange border-accent-orange'
+        : 'bg-panel-bg text-text-secondary border-panel-border'
+    }`}>
+      <span className="min-w-0 break-words">
+        {img.inUse ? fmt(t.status.inUse, { count: img.containers }) : img.dangling ? t.status.dangling : t.status.available}
+      </span>
+    </span>
+  );
+  const imageActions = (img: PodmanImage) => (
+    <>
+      {!img.dangling && (
+        <SmallActionButton
+          label={t.common.run}
+          accent
+          icon={<Play className="w-3 h-3" />}
+          onClick={() => {
+            setRunImageTarget(img);
+            setRunContainerName('');
+            setRunPorts('');
+          }}
+        />
+      )}
+      {(settings?.enablePushCommand ?? true) && !img.dangling && (
+        <SmallActionButton
+          label={t.common.push}
+          icon={<Upload className="w-3 h-3" />}
+          onClick={() => openPushModal(img)}
+        />
+      )}
+      <SmallActionButton
+        label={t.common.delete}
+        danger
+        disabled={busy}
+        icon={<Trash2 className="w-3 h-3" />}
+        onClick={() => removeImages([img])}
+      />
+    </>
+  );
 
   return (
     <div className="flex flex-col h-full min-h-0">
@@ -225,8 +293,8 @@ export const ImagesPage: React.FC = () => {
             />
           </div>
 
-          <div className="flex items-center gap-2 flex-wrap">
-            <div className="flex items-center gap-1 bg-panel-card border border-panel-border rounded-md p-1">
+          <div className="flex min-w-0 max-w-full items-center gap-2 flex-wrap">
+            <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1 bg-panel-card border border-panel-border rounded-md p-1">
               {(
                 [
                   ['all', t.images.filterAll],
@@ -239,7 +307,7 @@ export const ImagesPage: React.FC = () => {
                   key={id}
                   type="button"
                   onClick={() => setFilterMode(id)}
-                  className={`px-2.5 py-1 text-xs rounded transition-colors ${
+                  className={`max-w-full break-words px-2.5 py-1 text-xs rounded transition-colors ${
                     filterMode === id
                       ? 'bg-accent-purple text-white font-medium'
                       : 'text-text-secondary hover:text-text-primary'
@@ -282,96 +350,86 @@ export const ImagesPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Images Table */}
-        {filtered.length === 0 ? (
-          <EmptyState
-            icon={<Layers className="w-8 h-8" />}
-            title={t.images.emptyTitle}
-            description={t.images.emptyDesc}
-          />
-        ) : (
-          <div className="bg-panel-card border border-panel-border rounded-md overflow-x-auto shadow-card">
-            <table className="w-full min-w-[700px] text-xs">
-              <thead>
-                <tr className="border-b border-panel-border text-text-secondary text-left bg-panel-bg">
-                  <th className="px-4 py-3"><span className="sr-only">{t.common.selectVisible}</span></th>
-                  <th className="px-4 py-3 font-medium">{t.images.colRepository}</th>
-                  <th className="px-4 py-3 font-medium">{t.images.colTag}</th>
-                  <th className="px-4 py-3 font-medium">{t.images.colId}</th>
-                  <th className="px-4 py-3 font-medium">{t.images.colSize}</th>
-                  <th className="px-4 py-3 font-medium">{t.images.colStatus}</th>
-                  <th className="px-4 py-3 font-medium text-right">{t.images.colActions}</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-panel-border">
-                {filtered.map((img) => (
-                  <tr key={`${img.id}-${img.repository}-${img.tag}`} className="hover:bg-panel-card-hover">
-                    <td className="px-4 py-3">
-                      <input
-                        type="checkbox"
-                        aria-label={fmt(t.common.selectResource, { name: imageRemovalName(img) })}
-                        checked={selection.selectedIds.has(imageSelectionKey(img))}
-                        disabled={busy}
-                        onChange={() => selection.toggle(imageSelectionKey(img))}
-                      />
-                    </td>
-                    <td className="px-4 py-3 font-mono font-medium text-text-primary break-all">
-                      {img.repository}
-                    </td>
-                    <td className="px-4 py-3 font-mono text-accent-purple">{img.tag}</td>
-                    <td className="px-4 py-3 font-mono text-text-muted">{img.id}</td>
-                    <td className="px-4 py-3 font-mono text-text-secondary">{img.size}</td>
-                    <td className="px-4 py-3">
-                      {img.inUse ? (
-                        <span className="px-2 py-0.5 text-[10px] rounded-full bg-green-500/15 text-accent-green border border-accent-green">
-                          {fmt(t.status.inUse, { count: img.containers })}
+        <div ref={imageLayoutRef} className="studio-images-layout">
+          {filtered.length === 0 ? (
+            <EmptyState
+              icon={<Layers className="w-8 h-8" />}
+              title={t.images.emptyTitle}
+              description={t.images.emptyDesc}
+            />
+          ) : compactImages ? (
+            <div className="studio-images-cards space-y-3">
+              {filtered.map((img) => (
+                <article key={`${img.id}-${img.repository}-${img.tag}`}
+                  className="bg-panel-card border border-panel-border rounded-md p-4 shadow-card space-y-3">
+                  <div className="flex items-start gap-3">
+                    {imageSelection(img)}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="min-w-0 break-all text-sm font-mono font-medium text-text-primary">
+                          {img.repository}
                         </span>
-                      ) : img.dangling ? (
-                        <span className="px-2 py-0.5 text-[10px] rounded-full bg-yellow-500/15 text-accent-orange border border-accent-orange">
-                          {t.status.dangling}
-                        </span>
-                      ) : (
-                        <span className="px-2 py-0.5 text-[10px] rounded-full bg-panel-bg text-text-secondary border border-panel-border">
-                          {t.status.available}
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="flex items-center justify-end gap-1.5">
-                        {!img.dangling && (
-                          <SmallActionButton
-                            label={t.common.run}
-                            accent
-                            icon={<Play className="w-3 h-3" />}
-                            onClick={() => {
-                              setRunImageTarget(img);
-                              setRunContainerName('');
-                              setRunPorts('');
-                            }}
-                          />
-                        )}
-                        {(settings?.enablePushCommand ?? true) && !img.dangling && (
-                          <SmallActionButton
-                            label={t.common.push}
-                            icon={<Upload className="w-3 h-3" />}
-                            onClick={() => openPushModal(img)}
-                          />
-                        )}
-                        <SmallActionButton
-                          label={t.common.delete}
-                          danger
-                          disabled={busy}
-                          icon={<Trash2 className="w-3 h-3" />}
-                          onClick={() => removeImages([img])}
-                        />
+                        {imageStatus(img)}
                       </div>
-                    </td>
+                    </div>
+                  </div>
+                  <dl className="studio-image-meta grid gap-2 text-xs">
+                    <div className="min-w-0">
+                      <dt className="text-text-secondary">{t.images.colTag}</dt>
+                      <dd className="break-all font-mono text-accent-purple">{img.tag}</dd>
+                    </div>
+                    <div className="min-w-0">
+                      <dt className="text-text-secondary">{t.images.colId}</dt>
+                      <dd className="break-all font-mono text-text-muted">{img.id}</dd>
+                    </div>
+                    <div className="min-w-0">
+                      <dt className="text-text-secondary">{t.images.colSize}</dt>
+                      <dd className="break-all font-mono text-text-secondary">{img.size}</dd>
+                    </div>
+                  </dl>
+                  <div className="flex flex-wrap items-center gap-1.5 border-t border-panel-border pt-3">
+                    {imageActions(img)}
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="studio-images-table bg-panel-card border border-panel-border rounded-md overflow-x-auto shadow-card">
+              <table className="w-full min-w-[700px] text-xs">
+                <thead>
+                  <tr className="border-b border-panel-border text-text-secondary text-left bg-panel-bg">
+                    <th className="px-4 py-3"><span className="sr-only">{t.common.selectVisible}</span></th>
+                    <th className="px-4 py-3 font-medium">{t.images.colRepository}</th>
+                    <th className="px-4 py-3 font-medium">{t.images.colTag}</th>
+                    <th className="px-4 py-3 font-medium">{t.images.colId}</th>
+                    <th className="px-4 py-3 font-medium">{t.images.colSize}</th>
+                    <th className="px-4 py-3 font-medium">{t.images.colStatus}</th>
+                    <th className="px-4 py-3 font-medium text-right">{t.images.colActions}</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+                </thead>
+                <tbody className="divide-y divide-panel-border">
+                  {filtered.map((img) => (
+                    <tr key={`${img.id}-${img.repository}-${img.tag}`} className="hover:bg-panel-card-hover">
+                      <td className="px-4 py-3">{imageSelection(img)}</td>
+                      <td className="px-4 py-3 font-mono font-medium text-text-primary break-all">
+                        {img.repository}
+                      </td>
+                      <td className="px-4 py-3 font-mono text-accent-purple">{img.tag}</td>
+                      <td className="px-4 py-3 font-mono text-text-muted">{img.id}</td>
+                      <td className="px-4 py-3 font-mono text-text-secondary whitespace-nowrap">{img.size}</td>
+                      <td className="px-4 py-3 whitespace-nowrap">{imageStatus(img)}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center justify-end gap-1.5">
+                          {imageActions(img)}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Build Image Modal */}

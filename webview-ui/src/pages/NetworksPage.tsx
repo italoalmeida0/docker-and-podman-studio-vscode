@@ -139,13 +139,13 @@ export const NetworksPage: React.FC = () => {
               className="input-field pl-9"
             />
           </div>
-          <div className="flex items-center gap-1 bg-panel-card border border-panel-border rounded-md p-1">
+          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1 bg-panel-card border border-panel-border rounded-md p-1">
             {([['all', t.common.all], ['unused', t.images.filterUnused], ['inUse', t.images.filterInUse]] as const).map(([id, label]) => (
               <button
                 key={id}
                 type="button"
                 onClick={() => setUsageFilter(id)}
-                className={`px-2.5 py-1 text-xs rounded ${usageFilter === id ? 'bg-accent-purple text-white' : 'text-text-secondary'}`}
+                className={`max-w-full break-words px-2.5 py-1 text-xs rounded ${usageFilter === id ? 'bg-accent-purple text-white' : 'text-text-secondary'}`}
               >
                 {label}
               </button>
@@ -303,7 +303,7 @@ export const NetworksPage: React.FC = () => {
                 />
               </div>
             </div>
-            <div className="flex items-center gap-5 pt-1">
+            <div className="flex flex-wrap items-center gap-5 pt-1">
               <label className="flex items-center gap-2 text-xs text-text-primary cursor-pointer">
                 <input
                   type="checkbox"

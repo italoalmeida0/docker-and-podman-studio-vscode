@@ -113,14 +113,16 @@ export const ComposeOptionsModal: React.FC<{
           <span className="font-mono break-all">{initial.file}</span>
         </div>
         {files.map((item, index) => (
-          <div key={`${item}-${index}`} className="flex items-center gap-2 rounded border border-panel-border bg-panel-bg px-3 py-2">
-            <span className="flex-1 text-xs font-mono break-all">{item}</span>
-            <SmallActionButton label={extra.projectMoveUp} disabled={index === 0 || saving}
-              icon={<ArrowUp className="w-3 h-3" />} onClick={() => moveFile(index, -1)} />
-            <SmallActionButton label={extra.projectMoveDown} disabled={index === files.length - 1 || saving}
-              icon={<ArrowDown className="w-3 h-3" />} onClick={() => moveFile(index, 1)} />
-            <SmallActionButton label={extra.projectRemoveOverride} disabled={saving} danger
-              icon={<Trash2 className="w-3 h-3" />} onClick={() => setFiles((current) => current.filter((_, i) => i !== index))} />
+          <div key={`${item}-${index}`} className="flex flex-wrap items-center gap-2 rounded border border-panel-border bg-panel-bg px-3 py-2">
+            <span className="min-w-0 flex-[1_1_10rem] text-xs font-mono break-all">{item}</span>
+            <div className="flex min-w-0 max-w-full flex-wrap gap-2">
+              <SmallActionButton label={extra.projectMoveUp} disabled={index === 0 || saving}
+                icon={<ArrowUp className="w-3 h-3" />} onClick={() => moveFile(index, -1)} />
+              <SmallActionButton label={extra.projectMoveDown} disabled={index === files.length - 1 || saving}
+                icon={<ArrowDown className="w-3 h-3" />} onClick={() => moveFile(index, 1)} />
+              <SmallActionButton label={extra.projectRemoveOverride} disabled={saving} danger
+                icon={<Trash2 className="w-3 h-3" />} onClick={() => setFiles((current) => current.filter((_, i) => i !== index))} />
+            </div>
           </div>
         ))}
         <SmallActionButton label={extra.projectAddOverride} disabled={saving}
@@ -135,9 +137,9 @@ export const ComposeOptionsModal: React.FC<{
       </div>
       <div>
         <label htmlFor="compose-env-file" className="block text-xs font-medium text-text-primary mb-1">{extra.projectEnvFile}</label>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <input id="compose-env-file" value={envFile} onChange={(event) => setEnvFile(event.target.value)}
-            disabled={saving} className="input-field font-mono text-xs flex-1" />
+            disabled={saving} className="input-field min-w-0 flex-[1_1_10rem] font-mono text-xs" />
           <SmallActionButton label={extra.projectBrowse} disabled={saving}
             icon={<FolderOpen className="w-3 h-3" />}
             onClick={() => postMessage('compose:options:pick', { file: initial.file, kind: 'env' })} />

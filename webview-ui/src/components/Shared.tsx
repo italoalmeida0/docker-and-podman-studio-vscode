@@ -1,7 +1,8 @@
 import React from 'react';
-import { LoaderCircle } from 'lucide-react';
+import { ChevronDown, LoaderCircle } from 'lucide-react';
 import { TranslationDict } from '../i18n/en';
 import { useI18n } from '../i18n';
+import { useFeedbackTexts } from '../i18n/feedback';
 import { ServiceStatus } from '../store';
 import { FeedbackCenter } from './FeedbackCenter';
 
@@ -101,11 +102,51 @@ export const StatusBadge: React.FC<{ status: ServiceStatus | string; customLabel
   return (
     <span
       title={title}
-      className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium border ${s.border} ${s.text} ${s.badgeBg}`}
+      className={`inline-flex max-w-full shrink-0 items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-medium border ${s.border} ${s.text} ${s.badgeBg}`}
     >
-      <span className={`w-1.5 h-1.5 rounded-full ${s.dot} ${s.pulse ? 'animate-pulse' : ''}`} />
-      {customLabel || s.label}
+      <span className={`w-1.5 h-1.5 shrink-0 rounded-full ${s.dot} ${s.pulse ? 'animate-pulse' : ''}`} />
+      <span className="min-w-0 break-words">{customLabel || s.label}</span>
     </span>
+  );
+};
+
+export const ResourceCardHeader: React.FC<{
+  name: string;
+  expanded: boolean;
+  onToggle: () => void;
+  selection?: React.ReactNode;
+  status: React.ReactNode;
+  children: React.ReactNode;
+  actions: React.ReactNode;
+}> = ({ name, expanded, onToggle, selection, status, children, actions }) => {
+  const feedback = useFeedbackTexts();
+  return (
+    <div className="px-3 sm:px-4 py-3 flex flex-wrap items-start justify-between gap-2 sm:gap-3">
+      <div className="flex min-w-0 max-w-full flex-[1_1_12rem] items-start gap-2 sm:gap-3">
+        {selection}
+        <button
+          type="button"
+          aria-expanded={expanded}
+          onClick={onToggle}
+          className="flex min-w-0 flex-1 flex-wrap items-center gap-2 text-left"
+        >
+          {status}
+          <span className="block min-w-0 flex-[1_1_7rem]">{children}</span>
+        </button>
+      </div>
+      <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1.5">
+        {actions}
+        <button
+          type="button"
+          aria-label={`${feedback.showDetails}: ${name}`}
+          aria-expanded={expanded}
+          onClick={onToggle}
+          className="shrink-0 p-1.5 rounded border border-panel-border text-text-secondary hover:text-text-primary"
+        >
+          <ChevronDown className={`w-4 h-4 transition-transform ${expanded ? 'rotate-180' : ''}`} />
+        </button>
+      </div>
+    </div>
   );
 };
 
@@ -118,7 +159,7 @@ export const StatCard: React.FC<{
 }> = ({ label, value, detail, icon }) => (
   <div className="bg-panel-card border border-panel-border rounded-xl px-4 py-3.5 shadow-card hover:bg-panel-card-hover transition-colors">
     <div className="flex items-center justify-between gap-2">
-      <div className="text-xs font-medium text-text-secondary truncate">{label}</div>
+      <div className="min-w-0 break-words text-xs font-medium text-text-secondary sm:truncate" title={label}>{label}</div>
       {icon && (
         <div className="w-7 h-7 rounded-lg bg-white/[0.04] border border-panel-border flex items-center justify-center text-text-secondary shrink-0">
           {icon}
@@ -128,7 +169,7 @@ export const StatCard: React.FC<{
     <div className="text-2xl font-semibold tracking-tight tabular-nums text-text-primary mt-2">
       {value}
     </div>
-    <div className="text-[11px] text-text-secondary mt-1 truncate">{detail}</div>
+    <div className="break-words text-[11px] text-text-secondary mt-1 sm:truncate" title={detail}>{detail}</div>
   </div>
 );
 
@@ -222,7 +263,7 @@ export const EmptyState: React.FC<{
     <p className="text-xs text-text-secondary mt-1 max-w-xl mx-auto leading-relaxed">
       {description}
     </p>
-    {action && <div className="mt-4 flex justify-center gap-2">{action}</div>}
+    {action && <div className="mt-4 flex min-w-0 max-w-full flex-wrap justify-center gap-2">{action}</div>}
   </div>
 );
 
@@ -272,22 +313,22 @@ export const Modal: React.FC<{
       role="dialog"
       aria-modal="true"
       aria-label={title}
-      className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-2 sm:p-6"
+      className="fixed inset-0 z-50 !m-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-2 sm:p-6"
       onClick={onClose}
     >
       <div
-        className={`w-full ${maxWidth} max-h-[calc(100vh-1rem)] sm:max-h-[88vh] flex flex-col bg-panel-card border border-panel-border rounded-xl shadow-elevated overflow-hidden`}
+        className={`w-full ${maxWidth} max-h-full sm:max-h-[min(100%,88vh)] flex flex-col bg-panel-card border border-panel-border rounded-xl shadow-elevated overflow-hidden`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="px-4 sm:px-5 py-3 sm:py-4 border-b border-panel-border flex items-start justify-between gap-4 shrink-0 max-h-[30vh] overflow-auto">
-          <div>
-            <h3 className="text-base font-semibold tracking-tight text-text-primary">{title}</h3>
-            {subtitle && <p className="text-xs text-text-secondary mt-1">{subtitle}</p>}
+          <div className="min-w-0 flex-1">
+            <h3 className="break-words text-base font-semibold tracking-tight text-text-primary">{title}</h3>
+            {subtitle && <p className="break-words text-xs text-text-secondary mt-1">{subtitle}</p>}
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="px-2.5 py-1 text-xs rounded-lg border border-panel-border text-text-secondary hover:text-text-primary hover:bg-white/[0.06]"
+            className="shrink-0 px-2.5 py-1 text-xs rounded-lg border border-panel-border text-text-secondary hover:text-text-primary hover:bg-white/[0.06]"
           >
             {t.common.close}
           </button>

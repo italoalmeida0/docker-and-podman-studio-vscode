@@ -183,7 +183,7 @@ export const ContainersPage: React.FC = () => {
           <p className="text-xs text-text-secondary mt-0.5">{t.containers.subtitle}</p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex max-w-full flex-wrap items-center gap-2">
           <ActionPillButton
             label={t.containers.createContainerBtn}
             variant="brand"
@@ -242,7 +242,7 @@ export const ContainersPage: React.FC = () => {
             />
           </div>
 
-          <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex min-w-0 max-w-full items-center gap-2 flex-wrap">
             {isPodman && (
               <label className="flex items-center gap-1.5 text-xs text-text-secondary cursor-pointer px-2">
                 <input
@@ -254,7 +254,7 @@ export const ContainersPage: React.FC = () => {
               </label>
             )}
 
-            <div className="flex items-center gap-1 bg-panel-card border border-panel-border rounded-md p-1">
+            <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1 bg-panel-card border border-panel-border rounded-md p-1">
               {(
                 [
                   ['all', t.common.all],
@@ -268,7 +268,7 @@ export const ContainersPage: React.FC = () => {
                   key={id}
                   type="button"
                   onClick={() => setFilterTab(id)}
-                  className={`px-2.5 py-1 text-xs rounded transition-colors ${
+                  className={`max-w-full break-words px-2.5 py-1 text-xs rounded transition-colors ${
                     activeFilter === id
                       ? `${isPodman ? 'bg-accent-purple' : 'bg-accent-blue'} text-white font-medium`
                       : 'text-text-secondary hover:text-text-primary'
@@ -330,7 +330,7 @@ export const ContainersPage: React.FC = () => {
                 <ChevronDown className={`w-4 h-4 transition-transform ${expanded ? 'rotate-180' : ''}`} />
               </button>
               {expanded && (
-                <div className="border-t border-panel-border bg-panel-bg p-4 space-y-2 border-l-2">
+                <div className="border-t border-panel-border bg-panel-bg p-2 sm:p-4 space-y-2 border-l-2">
                   {renderContainers(containers)}
                 </div>
               )}

@@ -1,6 +1,5 @@
 import React, { useMemo, useState } from 'react';
 import {
-  ChevronDown,
   FileText,
   Pause,
   Play,
@@ -19,6 +18,7 @@ import {
   ActionPillButton,
   DetailRow,
   Modal,
+  ResourceCardHeader,
   SmallActionButton,
   StatusBadge,
 } from '../components/Shared';
@@ -101,7 +101,7 @@ export const PodGroups: React.FC<{
 
   return (
     <>
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-sm font-semibold text-text-primary">{t.pods.title}</h2>
         <ActionPillButton
           label={t.pods.createPodBtn}
@@ -120,131 +120,120 @@ export const PodGroups: React.FC<{
       />
 
       <div className="space-y-3">
-            {visiblePods.map((pod) => {
-              const podKey = pod.fullId || pod.id;
-              const expanded = expandedPods[podKey] !== false;
-              const isRunning = isRunningState(pod.state);
-              const isPaused = pod.state === 'paused';
-              return (
-                <div
-                  key={pod.fullId || pod.id}
-                  className="bg-panel-card border border-panel-border rounded-md overflow-hidden shadow-card"
-                >
-                  <div className="px-4 py-3.5 flex items-center justify-between gap-4 flex-wrap">
-                    {pod.fullId && (
-                      <input
-                        type="checkbox"
-                        aria-label={fmt(t.common.selectResource, { name: pod.name })}
-                        checked={selection.selectedIds.has(pod.fullId)}
-                        disabled={busy}
-                        onChange={() => selection.toggle(pod.fullId)}
-                      />
-                    )}
-                    <div
-                      className="flex items-center gap-3 min-w-0 flex-1 cursor-pointer"
-                      onClick={() => onTogglePod(podKey)}
-                    >
-                      <StatusBadge status={statusForPod(pod)} title={feedback.groupStatusHint} />
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="font-semibold text-sm text-text-primary truncate">
-                            {pod.name}
-                          </span>
-                          <span className="text-xs font-mono text-text-muted">{pod.id}</span>
-                          <span className="px-2 py-0.5 text-[11px] rounded bg-panel-bg border border-panel-border text-text-secondary">
-                            {fmt(t.pods.containersCount, { count: pod.containers.length })}
-                          </span>
-                        </div>
-                        <div className="text-xs text-text-secondary mt-0.5 truncate">
-                          {t.pods.networksLabel}: {pod.networks.join(', ') || t.common.default} ·{' '}
-                          {t.pods.createdLabel}: {pod.created || '-'}
-                        </div>
-                      </div>
-                    </div>
+        {visiblePods.map((pod) => {
+          const podKey = pod.fullId || pod.id;
+          const expanded = expandedPods[podKey] !== false;
+          const isRunning = isRunningState(pod.state);
+          const isPaused = pod.state === 'paused';
+          return (
+            <div
+              key={pod.fullId || pod.id}
+              className="bg-panel-card border border-panel-border rounded-md overflow-hidden shadow-card"
+            >
+              <ResourceCardHeader
+                name={pod.name}
+                expanded={expanded}
+                onToggle={() => onTogglePod(podKey)}
+                selection={pod.fullId && (
+                  <input
+                    type="checkbox"
+                    className="mt-1 shrink-0"
+                    aria-label={fmt(t.common.selectResource, { name: pod.name })}
+                    checked={selection.selectedIds.has(pod.fullId)}
+                    disabled={busy}
+                    onChange={() => selection.toggle(pod.fullId)}
+                  />
+                )}
+                status={<StatusBadge status={statusForPod(pod)} title={feedback.groupStatusHint} />}
+                actions={
+                  <>
+                    <SmallActionButton
+                      label={t.common.start}
+                      accent
+                      disabled={busy || isRunning || isPaused}
+                      icon={<Play className="w-3 h-3" />}
+                      onClick={() => postMessage('pod:start', { podId: pod.fullId || pod.id })}
+                    />
+                    <SmallActionButton
+                      label={t.common.stop}
+                      disabled={busy || !isRunning || pod.state === 'stopping'}
+                      icon={<Square className="w-3 h-3" />}
+                      onClick={() => postMessage('pod:stop', { podId: pod.fullId || pod.id })}
+                    />
+                    <SmallActionButton
+                      label={t.common.restart}
+                      disabled={busy || isPaused || pod.state === 'stopping'}
+                      icon={<RotateCcw className="w-3 h-3" />}
+                      onClick={() => postMessage('pod:restart', { podId: pod.fullId || pod.id })}
+                    />
+                    <SmallActionButton
+                      label={isPaused ? t.common.resume : t.common.pause}
+                      disabled={busy || (!isPaused && !isRunning)}
+                      icon={isPaused ? <Play className="w-3 h-3" /> : <Pause className="w-3 h-3" />}
+                      onClick={() =>
+                        postMessage(isPaused ? 'pod:unpause' : 'pod:pause', {
+                          podId: pod.fullId,
+                        })
+                      }
+                    />
+                    <SmallActionButton
+                      label={t.common.logs}
+                      icon={<FileText className="w-3 h-3" />}
+                      onClick={() => {
+                        clearLogs();
+                        setLogModalPod(pod);
+                        postMessage('pod:logs', { podId: pod.fullId || pod.id, podName: pod.name });
+                      }}
+                    />
+                    <SmallActionButton
+                      label={t.common.delete}
+                      danger
+                      disabled={busy}
+                      icon={<Trash2 className="w-3 h-3" />}
+                      onClick={() => setConfirmDeletePod(pod)}
+                    />
+                  </>
+                }
+              >
+                <span className="flex items-center gap-2 flex-wrap">
+                  <span className="font-semibold text-sm text-text-primary break-all">
+                    {pod.name}
+                  </span>
+                  <span className="text-xs font-mono text-text-muted break-all">{pod.id}</span>
+                  <span className="max-w-full break-words px-2 py-0.5 text-[11px] rounded bg-panel-bg border border-panel-border text-text-secondary">
+                    {fmt(t.pods.containersCount, { count: pod.containers.length })}
+                  </span>
+                </span>
+                <span className="block text-xs text-text-secondary mt-0.5 truncate"
+                  title={`${t.pods.networksLabel}: ${pod.networks.join(', ') || t.common.default} · ${t.pods.createdLabel}: ${pod.created || '-'}`}>
+                  {t.pods.networksLabel}: {pod.networks.join(', ') || t.common.default} ·{' '}
+                  {t.pods.createdLabel}: {pod.created || '-'}
+                </span>
+              </ResourceCardHeader>
 
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <SmallActionButton
-                        label={t.common.start}
-                        accent
-                        disabled={busy || isRunning || isPaused}
-                        icon={<Play className="w-3 h-3" />}
-                        onClick={() => postMessage('pod:start', { podId: pod.fullId || pod.id })}
-                      />
-                      <SmallActionButton
-                        label={t.common.stop}
-                        disabled={busy || !isRunning || pod.state === 'stopping'}
-                        icon={<Square className="w-3 h-3" />}
-                        onClick={() => postMessage('pod:stop', { podId: pod.fullId || pod.id })}
-                      />
-                      <SmallActionButton
-                        label={t.common.restart}
-                        disabled={busy || isPaused || pod.state === 'stopping'}
-                        icon={<RotateCcw className="w-3 h-3" />}
-                        onClick={() => postMessage('pod:restart', { podId: pod.fullId || pod.id })}
-                      />
-                      <SmallActionButton
-                        label={isPaused ? t.common.resume : t.common.pause}
-                        disabled={busy || (!isPaused && !isRunning)}
-                        icon={isPaused ? <Play className="w-3 h-3" /> : <Pause className="w-3 h-3" />}
-                        onClick={() =>
-                          postMessage(isPaused ? 'pod:unpause' : 'pod:pause', {
-                            podId: pod.fullId,
-                          })
-                        }
-                      />
-                      <SmallActionButton
-                        label={t.common.logs}
-                        icon={<FileText className="w-3 h-3" />}
-                        onClick={() => {
-                          clearLogs();
-                          setLogModalPod(pod);
-                          postMessage('pod:logs', { podId: pod.fullId || pod.id, podName: pod.name });
-                        }}
-                      />
-                      <SmallActionButton
-                        label={t.common.delete}
-                        danger
-                        disabled={busy}
-                        icon={<Trash2 className="w-3 h-3" />}
-                        onClick={() => setConfirmDeletePod(pod)}
-                      />
-                      <button
-                        type="button"
-                        aria-label={pod.name}
-                        aria-expanded={expanded}
-                        onClick={() => onTogglePod(podKey)}
-                        className="p-1.5 rounded border border-panel-border text-text-secondary hover:text-text-primary"
-                      >
-                        <ChevronDown
-                          className={`w-4 h-4 transition-transform ${expanded ? 'rotate-180' : ''}`}
-                        />
-                      </button>
-                    </div>
+              {expanded && (
+                <div className="border-t border-panel-border bg-panel-bg px-2 sm:px-4 py-4 space-y-4">
+                  <div className="grid grid-cols-4 gap-3">
+                    <DetailRow label={t.pods.fullPodId} value={pod.fullId} />
+                    <DetailRow label={t.pods.infraContainerId} value={pod.infraId || '-'} />
+                    <DetailRow label={t.pods.rawStatus} value={pod.status} />
+                    <DetailRow label={t.pods.networksLabel} value={pod.networks.join(', ') || '-'} />
                   </div>
 
-                  {expanded && (
-                    <div className="border-t border-panel-border bg-panel-bg px-4 py-4 space-y-4">
-                      <div className="grid grid-cols-4 gap-3">
-                        <DetailRow label={t.pods.fullPodId} value={pod.fullId} />
-                        <DetailRow label={t.pods.infraContainerId} value={pod.infraId || '-'} />
-                        <DetailRow label={t.pods.rawStatus} value={pod.status} />
-                        <DetailRow label={t.pods.networksLabel} value={pod.networks.join(', ') || '-'} />
-                      </div>
-
-                      <div>
-                        <div className="text-[11px] uppercase tracking-wider text-text-secondary mb-2">
-                          {fmt(t.pods.memberContainers, { count: pod.containers.length })}
-                        </div>
-                        <div className="space-y-2 border-l-2 border-panel-border pl-4">
-                          {renderContainers(pod)}
-                        </div>
-                      </div>
+                  <div>
+                    <div className="text-[11px] uppercase tracking-wider text-text-secondary mb-2">
+                      {fmt(t.pods.memberContainers, { count: pod.containers.length })}
                     </div>
-                  )}
+                    <div className="space-y-2 border-l-2 border-panel-border pl-2 sm:pl-4">
+                      {renderContainers(pod)}
+                    </div>
+                  </div>
                 </div>
-              );
-            })}
-          </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
 
       {/* Create Pod Modal */}
       {showCreateModal && (

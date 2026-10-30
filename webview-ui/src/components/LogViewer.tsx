@@ -68,14 +68,14 @@ export const LogViewer: React.FC<{
           </div>
         ) : (
           filtered.map((item, idx) => (
-            <div key={idx} className="flex gap-2.5 hover:bg-white/[0.03] py-0.5 px-1.5 rounded">
-              <span className="text-text-muted shrink-0 select-none tabular-nums">
+            <div key={idx} className="flex flex-wrap gap-x-2.5 hover:bg-white/[0.03] py-0.5 px-1.5 rounded">
+              <span className="max-w-full break-all text-text-muted select-none tabular-nums">
                 {formatLogTimestamp(item.timestamp)}
               </span>
-              <span className="text-sky-400/90 shrink-0 select-none font-medium">
+              <span className="max-w-full break-all text-sky-400/90 select-none font-medium">
                 [{item.service}]
               </span>
-              <span className={`${LEVEL_COLORS[item.level] || 'text-text-primary'} break-all whitespace-pre-wrap`}>
+              <span className={`${LEVEL_COLORS[item.level] || 'text-text-primary'} min-w-0 flex-1 basis-[12rem] break-all whitespace-pre-wrap`}>
                 {item.message}
               </span>
             </div>

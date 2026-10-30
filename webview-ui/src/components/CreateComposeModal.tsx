@@ -245,12 +245,12 @@ export const CreateComposeModal: React.FC<{
                 <label className="block text-xs text-text-secondary mb-1">
                   {t.wizard.directoryLabel}
                 </label>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <input
                     type="text"
                     value={directory}
                     onChange={(e) => setDirectory(e.target.value)}
-                    className="input-field font-mono"
+                    className="input-field min-w-0 flex-[1_1_10rem] font-mono"
                   />
                   <SmallActionButton
                     label={t.common.folder}
@@ -309,7 +309,7 @@ export const CreateComposeModal: React.FC<{
                 <div className="space-y-2">
                   <div className="flex items-center justify-between gap-2 flex-wrap">
                     <span className="text-xs font-semibold text-text-primary">{extra.servicesInWizard}</span>
-                    <div className="flex gap-2">
+                    <div className="flex min-w-0 max-w-full flex-wrap gap-2">
                       <SmallActionButton
                         label={extra.addAnotherService}
                         icon={<Plus className="w-3 h-3" />}

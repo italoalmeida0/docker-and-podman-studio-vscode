@@ -164,7 +164,7 @@ export const SettingsPage: React.FC = () => {
           <p className="text-xs text-text-secondary mt-0.5">{t.settings.subtitle}</p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
           <ActionPillButton
             label={t.settings.resetPathsBtn}
             icon={<RotateCcw className="w-3.5 h-3.5" />}
@@ -209,8 +209,8 @@ export const SettingsPage: React.FC = () => {
                   : 'border-panel-border bg-panel-bg hover:bg-white/[0.03]'
               }`}
             >
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex min-w-0 flex-wrap items-center gap-2.5">
                   <span className="w-8 h-8 rounded-lg bg-sky-500/[0.14] border border-sky-400/25 text-sky-400 flex items-center justify-center">
                     <DockerMark className="w-4 h-4" />
                   </span>
@@ -240,8 +240,8 @@ export const SettingsPage: React.FC = () => {
                   : 'border-panel-border bg-panel-bg hover:bg-white/[0.03]'
               }`}
             >
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex min-w-0 flex-wrap items-center gap-2.5">
                   <span className="w-8 h-8 rounded-lg bg-violet-500/[0.14] border border-violet-400/25 text-violet-400 flex items-center justify-center">
                     <PodmanMark className="w-4 h-4" />
                   </span>
@@ -470,29 +470,32 @@ export const SettingsPage: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-6 pt-1 flex-wrap">
-            <label className="flex items-center gap-2 text-xs text-text-primary cursor-pointer">
+            <label className="flex min-w-0 max-w-full items-start gap-2 text-xs text-text-primary cursor-pointer">
               <input
                 type="checkbox"
+                className="mt-0.5 shrink-0"
                 checked={form.autoDetectFiles}
                 onChange={(e) => updateField('autoDetectFiles', e.target.checked)}
               />
-              {t.settings.autoDetectComposeCheckbox}
+              <span className="min-w-0 break-words">{t.settings.autoDetectComposeCheckbox}</span>
             </label>
-            <label className="flex items-center gap-2 text-xs text-text-primary cursor-pointer">
+            <label className="flex min-w-0 max-w-full items-start gap-2 text-xs text-text-primary cursor-pointer">
               <input
                 type="checkbox"
+                className="mt-0.5 shrink-0"
                 checked={form.confirmDeletions}
                 onChange={(e) => updateField('confirmDeletions', e.target.checked)}
               />
-              {t.settings.confirmDeletionsCheckbox}
+              <span className="min-w-0 break-words">{t.settings.confirmDeletionsCheckbox}</span>
             </label>
-            <label className="flex items-center gap-2 text-xs text-text-primary cursor-pointer">
+            <label className="flex min-w-0 max-w-full items-start gap-2 text-xs text-text-primary cursor-pointer">
               <input
                 type="checkbox"
+                className="mt-0.5 shrink-0"
                 checked={form.enablePushCommand}
                 onChange={(e) => updateField('enablePushCommand', e.target.checked)}
               />
-              {t.settings.enablePushCheckbox}
+              <span className="min-w-0 break-words">{t.settings.enablePushCheckbox}</span>
             </label>
           </div>
         </div>
@@ -603,13 +606,14 @@ export const SettingsPage: React.FC = () => {
           </div>
 
           <div className="flex items-center justify-between gap-4 pt-2 flex-wrap">
-            <label className="flex items-center gap-2 text-xs text-text-primary cursor-pointer">
+            <label className="flex min-w-0 max-w-full items-start gap-2 text-xs text-text-primary cursor-pointer">
               <input
                 type="checkbox"
+                className="mt-0.5 shrink-0"
                 checked={form.registryAutoLogin}
                 onChange={(e) => updateField('registryAutoLogin', e.target.checked)}
               />
-              {fmt(t.settings.autoEngineLoginCheckbox, { cmd: engineCmd })}
+              <span className="min-w-0 break-words">{fmt(t.settings.autoEngineLoginCheckbox, { cmd: engineCmd })}</span>
             </label>
 
             <div className="flex items-center gap-2">

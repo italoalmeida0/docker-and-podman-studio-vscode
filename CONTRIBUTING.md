@@ -43,6 +43,15 @@ python -m scripts.generate_brand_icon
 
 Run `npm test` for the regression suite. It does not require Podman and skips the opt-in integration tests. CI runs the same suite, type-checks the extension host, and builds the webview and extension.
 
+### Responsive webview test
+
+The opt-in browser test checks narrow and wide layouts, all supported interface languages, dialogs, keyboard access, and selected-resource actions. It starts a local Vite server and a temporary Chromium profile, uses simulated resources and VS Code messages, and does not change Podman resources. Use Node.js 22 or later, install the existing webview dependencies, and set `STUDIO_BROWSER_PATH` to a Chromium-based browser executable. For example, on Windows PowerShell:
+
+```powershell
+$env:STUDIO_BROWSER_PATH = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+node --test tests\responsive-layout.test.cjs
+```
+
 ### Podman integration tests
 
 These opt-in tests create uniquely named containers, pods, networks, volumes, images, and Compose projects, then remove only those test resources. They require a running Podman engine with CPU and memory limit support, a compatible Compose provider, and a Linux image that is already available locally and contains `sh`. Image-declared volume paths are mounted as temporary filesystems to avoid leaving anonymous volumes; paths containing commas, colons, dollar signs, or newlines are not supported. They do not run global prune, machine lifecycle, registry login/logout, or push commands. Use an isolated test engine when possible.

@@ -166,9 +166,9 @@ export const ToolsPage: React.FC = () => {
             {quickLinks.map((item) => (
               <div
                 key={item.url}
-                className="bg-panel-bg border border-panel-border rounded-md p-4 flex items-start justify-between gap-3"
+                className="bg-panel-bg border border-panel-border rounded-md p-4 flex flex-wrap items-start justify-between gap-3"
               >
-                <div className="space-y-1">
+                <div className="min-w-0 max-w-full flex-[1_1_8rem] space-y-1 break-words">
                   <div className="text-sm font-medium text-text-primary">{item.title}</div>
                   <p className="text-xs text-text-secondary">{item.desc}</p>
                 </div>

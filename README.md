@@ -26,6 +26,8 @@ Manage **Compose stacks**, **Interactive Architecture Topologies**, **Containers
 
 ![Compose Studio Interactive Topology Graph](resources/screenshots/01-compose-topology.png)
 
+The screenshots show VS Code connected to a real Podman demonstration project. Resource names and log messages are illustrative; the hostname is obscured for privacy.
+
 ---
 
 ## Why Developers Love Docker and Podman Studio
@@ -40,20 +42,27 @@ Manage **Compose stacks**, **Interactive Architecture Topologies**, **Containers
 ## Visual Tour
 
 ### 1. Unified Engine Dashboard, Docker Contexts & Storage Analytics
-Inspect live daemon telemetry, switch between local and remote **Docker Contexts** (`desktop-linux`, `orbstack`, remote SSH hosts), and analyze reclaimable disk usage (`system df`) at a glance.
+Review resource counts, **Podman Machine** status, and storage usage at a glance. In Docker mode, inspect and switch between available local or remote **Docker Contexts**.
 
-![Unified Dashboard and Docker Contexts](resources/screenshots/02-dual-engine-dashboard.png)
+![Studio dashboard with the Podman engine active](resources/screenshots/02-dual-engine-dashboard.png)
 
 ### 2. One-Click Podman Mode & Kubernetes-Style Pods
 Switch to **Podman** anytime to unlock daemonless rootless container management, **Podman Machine** VM lifecycle controls, and native **Kubernetes-style Pods** with shared network/IPC namespaces. Pods and their member containers appear together in the Containers tree.
 
-### 3. Real-Time Multi-Service Log Streaming
+![Podman pod and member container in the Containers tree](resources/screenshots/03-podman-pods.png)
+
+### 3. Image Management & Selection
+Filter image repositories, inspect their usage, and select multiple images for removal. Images in use are protected from forced removal in Podman mode.
+
+![Podman images with multiple images selected](resources/screenshots/06-image-management.png)
+
+### 4. Real-Time Multi-Service Log Streaming
 Debug distributed stacks effortlessly with color-coded log levels, per-service filter pills, instant text search, pause/resume controls, or 1-click routing to the VS Code Output Channel and integrated Terminal.
 
 ![Real-Time Multi-Service Log Streaming](resources/screenshots/04-live-logs-streaming.png)
 
-### 4. Instant Engine Selector & 16-Language Localization
-Switch between **Docker** and **Podman** or choose from **16 built-in languages** (shown below in Russian — `Русский`) directly inside Studio Settings.
+### 5. Instant Engine Selector & 16-Language Localization
+Switch between **Docker** and **Podman** or choose from **16 built-in languages** (shown below in Brazilian Portuguese) directly inside Studio Settings.
 
 ![16 Languages and Dual-Engine Settings](resources/screenshots/05-multilang-settings.png)
 
@@ -98,6 +107,7 @@ Studio monitors selected Compose files, the selected and default environment fil
 - **Podman Batch Controls**: Select visible containers or pods to start, stop, or restart eligible resources together. Failures are reported per resource. Individual containers and pods can also be paused and resumed; Podman infra containers are protected from individual lifecycle and delete actions.
 - **Resource Selection and Cleanup**: Select images or unused volumes and networks for removal. Cleanup identifies candidates explicitly, including named unused volumes, and asks for confirmation with their names; deleting volumes permanently removes their data. Stopped containers count as references. Default networks and Docker non-local networks are protected, and resources are checked again before removal without force.
 - **OCI Images, Builds & Prune Suite**: Pull images, build from `Dockerfile` or `Containerfile`, push to remote registries, and reclaim disk space (`Prune Dangling`, `Prune All Unused`, `Clear Builder Cache`).
+- **Responsive Studio**: Image details switch between a compact card layout and a table as the available space changes, while preserving the current selection. Resource actions and Compose controls wrap for narrow windows.
 - **Progress & Errors**: Long-running actions show elapsed time, actual batch counts, and expandable live command output when the engine reports it. Recoverable problems use a softer warning style, while serious failures remain distinct. Success messages disappear automatically; unresolved failures stay visible until dismissed or the corresponding operation recovers. Engine-specific feedback is cleared when switching engines, and late feedback cannot overwrite a newer attempt. Resource refreshes report partial failures without hiding successfully loaded resources, and reopening Studio restores current progress and available resource data. Common explanations follow the selected language; technical details retain their original text. Command Palette actions also show VS Code progress and can open the **Docker and Podman Studio** output channel.
 - **Encrypted Registry Authentication**: Store private registry credentials securely in **VS Code `SecretStorage`** (never written in plaintext to `settings.json`) with optional automatic `docker login` / `podman login`.
 

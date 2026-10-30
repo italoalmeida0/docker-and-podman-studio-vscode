@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Boxes,
-  ChevronDown,
   Edit3,
   FileCode2,
   FilePlus2,
@@ -28,6 +27,7 @@ import {
   DetailRow,
   EmptyState,
   Modal,
+  ResourceCardHeader,
   SmallActionButton,
   StatCard,
   StatusBadge,
@@ -410,11 +410,11 @@ export const ComposePage: React.FC = () => {
       {/* Studio Compose Top Header */}
       <div className="studio-page-header px-3 sm:px-6 py-4 border-b border-panel-border bg-panel-card space-y-3">
         <div className="flex items-start justify-between gap-4 flex-wrap">
-          <div className="min-w-0">
+          <div className="min-w-0 max-w-full">
             <div className="flex items-center gap-2.5 flex-wrap">
               <h1 className="text-[17px] font-semibold tracking-tight text-text-primary">{t.compose.title}</h1>
               {activePodName && (
-                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs bg-violet-500/10 border border-violet-500/20 text-violet-300 font-mono">
+                <span className="inline-flex max-w-full items-center gap-1.5 break-all px-2.5 py-0.5 rounded-full text-xs bg-violet-500/10 border border-violet-500/20 text-violet-300 font-mono">
                   {fmt(t.compose.podBadge, { name: activePodName })}
                 </span>
               )}
@@ -425,7 +425,7 @@ export const ComposePage: React.FC = () => {
           </div>
 
           {/* File Selector & Wizard Controls */}
-          <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex min-w-0 max-w-full items-center gap-2 flex-wrap">
             <ActionPillButton
               label={t.compose.newCompose}
               variant="podman"
@@ -502,7 +502,7 @@ export const ComposePage: React.FC = () => {
 
           {activeFile && (
             <div role="toolbar" aria-label={selectedServiceScope ? feedback.selectedServices : feedback.wholeProject}
-              className="flex items-center gap-2 flex-wrap">
+              className="flex min-w-0 max-w-full items-center gap-2 flex-wrap">
               {tab === 'services' && (
                 <SelectionBar selection={serviceSelection} busy={busy} inline />
               )}
@@ -694,13 +694,13 @@ export const ComposePage: React.FC = () => {
                         className="bg-panel-card border border-panel-border rounded-md p-4 shadow-card flex flex-col justify-between gap-3"
                       >
                         <div className="space-y-2">
-                          <div className="flex items-center justify-between gap-2">
-                            <div className="flex items-center gap-2 min-w-0">
-                              <span className="font-semibold text-sm text-text-primary truncate">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
+                              <span className="font-semibold text-sm text-text-primary break-all">
                                 {svcName}
                               </span>
                               {st?.podName && (
-                                <span className="px-1.5 py-0.5 text-[10px] rounded bg-purple-500/15 text-accent-purple font-mono">
+                                <span className="max-w-full break-all px-1.5 py-0.5 text-[10px] rounded bg-purple-500/15 text-accent-purple font-mono">
                                   {st.podName}
                                 </span>
                               )}
@@ -717,7 +717,7 @@ export const ComposePage: React.FC = () => {
                             {ports.map((p, i) => (
                               <span
                                 key={i}
-                                className="px-2 py-0.5 text-[11px] rounded bg-panel-bg border border-panel-border font-mono text-text-primary"
+                                className="max-w-full break-all px-2 py-0.5 text-[11px] rounded bg-panel-bg border border-panel-border font-mono text-text-primary"
                               >
                                 {fmt(t.compose.portBadge, { port: p })}
                               </span>
@@ -725,7 +725,7 @@ export const ComposePage: React.FC = () => {
                             {nets.map((n, i) => (
                               <span
                                 key={i}
-                                className="px-2 py-0.5 text-[11px] rounded bg-panel-bg border border-panel-border font-mono text-accent-purple"
+                                className="max-w-full break-all px-2 py-0.5 text-[11px] rounded bg-panel-bg border border-panel-border font-mono text-accent-purple"
                               >
                                 {fmt(t.compose.netBadge, { net: n })}
                               </span>
@@ -733,7 +733,7 @@ export const ComposePage: React.FC = () => {
                             {deps.map((d, i) => (
                               <span
                                 key={i}
-                                className="px-2 py-0.5 text-[11px] rounded bg-panel-bg border border-panel-border font-mono text-text-secondary"
+                                className="max-w-full break-all px-2 py-0.5 text-[11px] rounded bg-panel-bg border border-panel-border font-mono text-text-secondary"
                               >
                                 {fmt(t.compose.depBadge, { dep: d })}
                               </span>
@@ -741,13 +741,13 @@ export const ComposePage: React.FC = () => {
                           </div>
                         </div>
 
-                        <div className="pt-2 border-t border-panel-border flex items-center justify-between gap-2">
-                          <span className="text-[11px] font-mono text-text-muted">
+                        <div className="pt-2 border-t border-panel-border flex flex-wrap items-center justify-between gap-2">
+                          <span className="min-w-0 break-all text-[11px] font-mono text-text-muted">
                             {st?.id
                               ? fmt(t.compose.containerPrefix, { id: st.id })
                               : t.common.notInstantiated}
                           </span>
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-1.5">
                             <SmallActionButton
                               label={t.common.start}
                               accent
@@ -809,177 +809,161 @@ export const ComposePage: React.FC = () => {
                       key={svcName}
                       className="bg-panel-card border border-panel-border rounded-md overflow-hidden shadow-card"
                     >
-                      <div className="px-4 py-3.5 flex items-center justify-between gap-4 flex-wrap">
-                        <input
+                      <ResourceCardHeader
+                        name={svcName}
+                        expanded={isOpen}
+                        onToggle={() =>
+                          setExpandedServices((prev) => ({
+                            ...prev,
+                            [svcName]: !prev[svcName],
+                          }))
+                        }
+                        selection={<input
                           type="checkbox"
+                          className="mt-1 shrink-0"
                           aria-label={fmt(t.common.selectResource, { name: svcName })}
                           checked={serviceSelection.selectedIds.has(svcName)}
                           disabled={busy}
                           onChange={() => serviceSelection.toggle(svcName)}
-                        />
-                        <div
-                          className="flex items-center gap-3 min-w-0 flex-1 cursor-pointer"
-                          onClick={() =>
-                            setExpandedServices((prev) => ({
-                              ...prev,
-                              [svcName]: !prev[svcName],
-                            }))
-                          }
-                        >
-                          <StatusBadge status={status} />
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span className="font-semibold text-sm text-text-primary">
-                                {svcName}
-                              </span>
-                              {st?.id && (
-                                <span className="text-xs font-mono text-text-muted">{st.id}</span>
-                              )}
-                              {engine === 'podman' && summary && summary.count > 1 && (
-                                <span className="text-xs text-text-secondary">
-                                  {fmt(t.compose.scaleCurrent, { count: summary.count })}
-                                </span>
-                              )}
-                              {st?.podName && (
-                                <span className="px-2 py-0.5 text-[10px] rounded bg-purple-500/15 text-accent-purple border border-accent-purple font-mono">
-                                  {fmt(t.compose.podBadge, { name: st.podName })}
-                                </span>
-                              )}
-                            </div>
-                            <div className="text-xs font-mono text-text-secondary truncate mt-0.5">
-                              {svc?.image || t.compose.localBuild}
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <SmallActionButton
-                            label={t.common.start}
-                            accent
-                            disabled={busy || isActive || projectActionsBlocked}
-                            icon={<Play className="w-3 h-3" />}
-                            onClick={() => handleServiceAction('start', svcName)}
-                          />
-                          <SmallActionButton
-                            label={t.common.stop}
-                            disabled={busy || !isActive || !projectReady}
-                            icon={<Square className="w-3 h-3" />}
-                            onClick={() => handleServiceAction('stop', svcName)}
-                          />
-                          <SmallActionButton
-                            label={t.common.restart}
-                            disabled={busy || projectActionsBlocked}
-                            icon={<RotateCcw className="w-3 h-3" />}
-                            onClick={() => handleServiceAction('restart', svcName)}
-                          />
-                          <SmallActionButton
-                            label={t.common.build}
-                            disabled={busy || projectActionsBlocked || !svc?.build}
-                            icon={<Hammer className="w-3 h-3" />}
-                            title={svc?.build ? extra.buildOnlyHint : extra.selectedBuildHint}
-                            onClick={() => runServices('build', [svcName])}
-                          />
-                          <SmallActionButton
-                            label={extra.rebuild}
-                            disabled={busy || projectActionsBlocked || !svc?.build}
-                            icon={<Hammer className="w-3 h-3" />}
-                            title={svc?.build ? extra.rebuildHint : extra.selectedBuildHint}
-                            onClick={() => runServices('rebuild', [svcName])}
-                          />
-                          <SmallActionButton
-                            label={extra.buildUp}
-                            disabled={busy || projectActionsBlocked || !svc?.build}
-                            icon={<Play className="w-3 h-3" />}
-                            title={svc?.build ? extra.buildUpHint : extra.selectedBuildHint}
-                            onClick={() => runServices('build-up', [svcName])}
-                          />
-                          {engine === 'podman' && (
+                        />}
+                        status={<StatusBadge status={status} />}
+                        actions={
+                          <>
                             <SmallActionButton
-                              label={t.compose.scaleService}
+                              label={t.common.start}
+                              accent
+                              disabled={busy || isActive || projectActionsBlocked}
+                              icon={<Play className="w-3 h-3" />}
+                              onClick={() => handleServiceAction('start', svcName)}
+                            />
+                            <SmallActionButton
+                              label={t.common.stop}
+                              disabled={busy || !isActive || !projectReady}
+                              icon={<Square className="w-3 h-3" />}
+                              onClick={() => handleServiceAction('stop', svcName)}
+                            />
+                            <SmallActionButton
+                              label={t.common.restart}
                               disabled={busy || projectActionsBlocked}
-                              icon={<Boxes className="w-3 h-3" />}
+                              icon={<RotateCcw className="w-3 h-3" />}
+                              onClick={() => handleServiceAction('restart', svcName)}
+                            />
+                            <SmallActionButton
+                              label={t.common.build}
+                              disabled={busy || projectActionsBlocked || !svc?.build}
+                              icon={<Hammer className="w-3 h-3" />}
+                              title={svc?.build ? extra.buildOnlyHint : extra.selectedBuildHint}
+                              onClick={() => runServices('build', [svcName])}
+                            />
+                            <SmallActionButton
+                              label={extra.rebuild}
+                              disabled={busy || projectActionsBlocked || !svc?.build}
+                              icon={<Hammer className="w-3 h-3" />}
+                              title={svc?.build ? extra.rebuildHint : extra.selectedBuildHint}
+                              onClick={() => runServices('rebuild', [svcName])}
+                            />
+                            <SmallActionButton
+                              label={extra.buildUp}
+                              disabled={busy || projectActionsBlocked || !svc?.build}
+                              icon={<Play className="w-3 h-3" />}
+                              title={svc?.build ? extra.buildUpHint : extra.selectedBuildHint}
+                              onClick={() => runServices('build-up', [svcName])}
+                            />
+                            {engine === 'podman' && (
+                              <SmallActionButton
+                                label={t.compose.scaleService}
+                                disabled={busy || projectActionsBlocked}
+                                icon={<Boxes className="w-3 h-3" />}
+                                onClick={() => {
+                                  setScaleReplicas('');
+                                  setScaleTarget(svcName);
+                                }}
+                              />
+                            )}
+                            {terminalContainer?.id && (
+                              <SmallActionButton
+                                label={t.common.terminal}
+                                disabled={!isActive}
+                                icon={<Terminal className="w-3 h-3" />}
+                                onClick={() =>
+                                  postMessage('container:terminal', {
+                                    containerId: terminalContainer.id,
+                                    name: terminalContainer.name || svcName,
+                                  })
+                                }
+                              />
+                            )}
+                            <SmallActionButton
+                              label={t.common.logs}
+                              onClick={() => openLogsForService(svcName)}
+                            />
+                            <SmallActionButton
+                              label={extra.editService}
+                              disabled={isActive || visualEditingBlocked || serviceFragments[svcName] === undefined ||
+                                Boolean(serviceDraft)}
+                              title={
+                                isActive
+                                  ? t.compose.editLockedTooltip
+                                  : serviceDraft
+                                  ? extra.finishServiceEdit
+                                  : serviceFragments[svcName] === undefined
+                                  ? extra.fragmentUnavailable
+                                  : t.compose.editTooltip
+                              }
+                              icon={isActive ? <Lock className="w-3 h-3" /> : <Edit3 className="w-3 h-3" />}
                               onClick={() => {
-                                setScaleReplicas('');
-                                setScaleTarget(svcName);
+                                setExpandedServices((prev) => ({ ...prev, [svcName]: true }));
+                                setServiceEditError(null);
+                                let visual;
+                                try {
+                                  visual = createVisualServiceDraft(serviceFragments[svcName]);
+                                } catch (error) {
+                                  visual = undefined;
+                                  captureServiceEditError(error);
+                                }
+                                setComposeServiceDraft(activeFile, {
+                                  name: svcName, base: rawYaml, text: serviceFragments[svcName], visual,
+                                });
                               }}
                             />
-                          )}
-                          {terminalContainer?.id && (
                             <SmallActionButton
-                              label={t.common.terminal}
-                              disabled={!isActive}
-                              icon={<Terminal className="w-3 h-3" />}
-                              onClick={() =>
-                                postMessage('container:terminal', {
-                                  containerId: terminalContainer.id,
-                                  name: terminalContainer.name || svcName,
-                                })
+                              label={t.common.remove}
+                              danger
+                              disabled={busy || isActive || otherVisualEditsBlocked}
+                              title={
+                                isActive
+                                  ? t.compose.removeLockedTooltip
+                                  : t.compose.removeTooltip
                               }
+                              icon={<Trash2 className="w-3 h-3" />}
+                              onClick={() => setRemoveServiceTarget(svcName)}
                             />
+                          </>
+                        }
+                      >
+                        <span className="flex items-center gap-2 flex-wrap">
+                          <span className="font-semibold text-sm text-text-primary break-all">
+                            {svcName}
+                          </span>
+                          {st?.id && (
+                            <span className="text-xs font-mono text-text-muted break-all">{st.id}</span>
                           )}
-                          <SmallActionButton
-                            label={t.common.logs}
-                            onClick={() => openLogsForService(svcName)}
-                          />
-                          <SmallActionButton
-                            label={extra.editService}
-                            disabled={isActive || visualEditingBlocked || serviceFragments[svcName] === undefined ||
-                              Boolean(serviceDraft)}
-                            title={
-                              isActive
-                                ? t.compose.editLockedTooltip
-                                : serviceDraft
-                                ? extra.finishServiceEdit
-                                : serviceFragments[svcName] === undefined
-                                ? extra.fragmentUnavailable
-                                : t.compose.editTooltip
-                            }
-                            icon={isActive ? <Lock className="w-3 h-3" /> : <Edit3 className="w-3 h-3" />}
-                            onClick={() => {
-                              setExpandedServices((prev) => ({ ...prev, [svcName]: true }));
-                              setServiceEditError(null);
-                              let visual;
-                              try {
-                                visual = createVisualServiceDraft(serviceFragments[svcName]);
-                              } catch (error) {
-                                visual = undefined;
-                                captureServiceEditError(error);
-                              }
-                              setComposeServiceDraft(activeFile, {
-                                name: svcName, base: rawYaml, text: serviceFragments[svcName], visual,
-                              });
-                            }}
-                          />
-                          <SmallActionButton
-                            label={t.common.remove}
-                            danger
-                            disabled={busy || isActive || otherVisualEditsBlocked}
-                            title={
-                              isActive
-                                ? t.compose.removeLockedTooltip
-                                : t.compose.removeTooltip
-                            }
-                            icon={<Trash2 className="w-3 h-3" />}
-                            onClick={() => setRemoveServiceTarget(svcName)}
-                          />
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setExpandedServices((prev) => ({
-                                ...prev,
-                                [svcName]: !prev[svcName],
-                              }))
-                            }
-                            className="p-1.5 rounded border border-panel-border text-text-secondary hover:text-text-primary"
-                          >
-                            <ChevronDown
-                              className={`w-4 h-4 transition-transform ${
-                                isOpen ? 'rotate-180' : ''
-                              }`}
-                            />
-                          </button>
-                        </div>
-                      </div>
+                          {engine === 'podman' && summary && summary.count > 1 && (
+                            <span className="text-xs text-text-secondary">
+                              {fmt(t.compose.scaleCurrent, { count: summary.count })}
+                            </span>
+                          )}
+                          {st?.podName && (
+                            <span className="inline-flex max-w-full break-all px-2 py-0.5 text-[10px] rounded bg-purple-500/15 text-accent-purple border border-accent-purple font-mono">
+                              {fmt(t.compose.podBadge, { name: st.podName })}
+                            </span>
+                          )}
+                        </span>
+                        <span className="block text-xs font-mono text-text-secondary truncate mt-0.5"
+                          title={svc?.image || t.compose.localBuild}>
+                          {svc?.image || t.compose.localBuild}
+                        </span>
+                      </ResourceCardHeader>
 
                       {isOpen && (
                         <div className="border-t border-panel-border bg-panel-bg p-4 space-y-4">
@@ -1043,7 +1027,7 @@ export const ComposePage: React.FC = () => {
                                     )}
                                 </div>
                               )}
-                              <div className="flex gap-2">
+                              <div className="flex flex-wrap gap-2">
                                 <SmallActionButton label={extra.visualEdit} disabled={Boolean(serviceDraft?.visual)}
                                   onClick={() => {
                                     if (!serviceDraft) return;
@@ -1134,12 +1118,12 @@ export const ComposePage: React.FC = () => {
                                   {composeContainers.filter((item) => item.service === svcName).map((item) => (
                                     <div key={item.fullId || item.id}
                                       className="bg-panel-card border border-panel-border rounded p-3 flex flex-wrap items-center gap-3 text-xs">
-                                      <span className="font-mono text-text-primary">{item.name || item.id}</span>
+                                      <span className="max-w-full break-all font-mono text-text-primary">{item.name || item.id}</span>
                                       <StatusBadge status={item.status} />
                                       {item.health && <span>{extra.health}: {item.health}</span>}
                                       {item.exitCode !== undefined && <span>{extra.exitCode}: {item.exitCode}</span>}
                                       {item.ports.length > 0 && (
-                                        <span className="font-mono text-text-secondary">
+                                        <span className="max-w-full break-all font-mono text-text-secondary">
                                           {extra.publishedPorts}: {item.ports.map((port) =>
                                             `${port.hostIp ? `${port.hostIp}:` : ''}${port.host || '-'}:${port.container}/${port.protocol}`
                                           ).join(', ')}
@@ -1154,7 +1138,7 @@ export const ComposePage: React.FC = () => {
                                 title={t.compose.cardEnvVars}
                                 lines={environmentLines(svc?.environment, showSensitive, extra.maskedValue)}
                               />
-                              <div className="flex items-center gap-3">
+                              <div className="flex flex-wrap items-center gap-3">
                                 <SmallActionButton
                                   label={showSensitive ? extra.hideSecrets : extra.maskSecrets}
                                   onClick={() => setShowSensitive((current) => !current)}
@@ -1174,7 +1158,7 @@ export const ComposePage: React.FC = () => {
             {/* TAB 4: VARIABLES */}
             {tab === 'variables' && (
               <div className="space-y-4">
-                <div className="flex items-center gap-3">
+                <div className="flex flex-wrap items-center gap-3">
                   <SmallActionButton
                     label={showSensitive ? extra.hideSecrets : extra.maskSecrets}
                     onClick={() => setShowSensitive((current) => !current)}
@@ -1230,7 +1214,7 @@ export const ComposePage: React.FC = () => {
                       count: Object.keys(document.networks || {}).length,
                     })}
                   </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_120px_auto] gap-2">
+                  <div className="studio-resource-form grid gap-2">
                     <input
                       type="text"
                       value={newNetName}
@@ -1265,9 +1249,9 @@ export const ComposePage: React.FC = () => {
                     {Object.entries(document.networks || {}).map(([name, cfg]: [string, any]) => (
                       <div
                         key={name}
-                        className="bg-panel-bg border border-panel-border rounded px-3 py-2 flex items-center justify-between text-xs"
+                        className="bg-panel-bg border border-panel-border rounded px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs"
                       >
-                        <div>
+                        <div className="min-w-0 max-w-full break-all">
                           <span className="font-mono font-semibold text-text-primary">{name}</span>
                           <span className="ml-2 text-text-secondary">
                             driver: {cfg?.driver || 'bridge'}
@@ -1291,7 +1275,7 @@ export const ComposePage: React.FC = () => {
                       count: Object.keys(document.volumes || {}).length,
                     })}
                   </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_120px_auto] gap-2">
+                  <div className="studio-resource-form grid gap-2">
                     <input
                       type="text"
                       value={newVolName}
@@ -1325,9 +1309,9 @@ export const ComposePage: React.FC = () => {
                     {Object.entries(document.volumes || {}).map(([name, cfg]: [string, any]) => (
                       <div
                         key={name}
-                        className="bg-panel-bg border border-panel-border rounded px-3 py-2 flex items-center justify-between text-xs"
+                        className="bg-panel-bg border border-panel-border rounded px-3 py-2 flex flex-wrap items-center justify-between gap-2 text-xs"
                       >
-                        <div>
+                        <div className="min-w-0 max-w-full break-all">
                           <span className="font-mono font-semibold text-text-primary">{name}</span>
                           <span className="ml-2 text-text-secondary">
                             driver: {cfg?.driver || 'local'}
@@ -1507,7 +1491,7 @@ export const ComposePage: React.FC = () => {
                   </h2>
                   <p className="text-xs text-text-secondary mt-0.5">
                     {t.compose.builderSubtitle}{' '}
-                    <code className="font-mono text-accent-purple">{activeFile}</code>.
+                    <code className="break-all font-mono text-accent-purple">{activeFile}</code>.
                   </p>
                 </div>
 

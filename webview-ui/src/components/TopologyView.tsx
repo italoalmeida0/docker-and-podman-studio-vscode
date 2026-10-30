@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { groupComposeContainers, summarizeComposeService } from '../composeStatus';
 import { composeEnvFiles, composeMounts, serviceNetworks } from '../composeTopology';
 import { useI18n } from '../i18n';
@@ -31,13 +31,14 @@ const NODE_WIDTH: Record<NodeItem['kind'], number> = {
   env: 220,
 };
 
-const NODE_HEIGHT: Record<NodeItem['kind'], number> = {
-  network: 92,
-  service: 132,
-  volume: 86,
-  bind: 86,
-  env: 86,
+const DEFAULT_NODE_HEIGHT: Record<NodeItem['kind'], number> = {
+  network: 150,
+  service: 170,
+  volume: 150,
+  bind: 125,
+  env: 125,
 };
+const NODE_GAP = 24;
 
 function extractList(val: any): string[] {
   if (!val) {
@@ -74,7 +75,8 @@ export const TopologyView: React.FC<{
   const { t, fmt, engine } = useI18n();
   const extra = useComposeExtras();
   const canvasRef = useRef<HTMLDivElement | null>(null);
-  const [positions, setPositions] = useState<Record<string, { x: number; y: number }>>({});
+  const [manualPositions, setManualPositions] = useState<Record<string, { x: number; y: number }>>({});
+  const [nodeHeights, setNodeHeights] = useState<Record<string, number>>({});
   const [dragging, setDragging] = useState<{
     id: string;
     offsetX: number;
@@ -99,7 +101,7 @@ export const TopologyView: React.FC<{
     [containers]
   );
 
-  const { nodes, edges, defaultPositions, canvasHeight } = useMemo(() => {
+  const { nodes, edges } = useMemo(() => {
     const nodeList: NodeItem[] = [];
     const edgeList: EdgeItem[] = [];
     const services = Object.entries(document.services || {});
@@ -254,49 +256,69 @@ export const TopologyView: React.FC<{
       nodeList.push(e);
     }
 
-    const pos: Record<string, { x: number; y: number }> = {};
-    const nets = nodeList.filter((n) => n.kind === 'network');
-    const svcs = nodeList.filter((n) => n.kind === 'service');
-    const rightCol = nodeList.filter(
-      (n) => n.kind === 'volume' || n.kind === 'bind' || n.kind === 'env'
-    );
-
-    nets.forEach((n, idx) => {
-      pos[n.id] = { x: 40, y: 48 + idx * 130 };
-    });
-    svcs.forEach((n, idx) => {
-      pos[n.id] = { x: 350, y: 40 + idx * 164 };
-    });
-    rightCol.forEach((n, idx) => {
-      pos[n.id] = { x: 710, y: 48 + idx * 116 };
-    });
-
-    const maxRowsHeight = Math.max(
-      nets.length * 130 + 90,
-      svcs.length * 164 + 90,
-      rightCol.length * 116 + 90,
-      520
-    );
-
-    return {
-      nodes: nodeList,
-      edges: edgeList,
-      defaultPositions: pos,
-      canvasHeight: maxRowsHeight,
-    };
+    return { nodes: nodeList, edges: edgeList };
   }, [document, statusMap, t, fmt, extra]);
 
-  useEffect(() => {
-    setPositions((prev) => {
-      const next = { ...defaultPositions };
-      for (const k of Object.keys(next)) {
-        if (prev[k]) {
-          next[k] = prev[k];
+  useLayoutEffect(() => {
+    const elements = canvasRef.current?.querySelectorAll<HTMLElement>('[data-topology-node]');
+    if (!elements?.length) return;
+
+    const observer = new ResizeObserver((entries) => {
+      setNodeHeights((previous) => {
+        let next = previous;
+        for (const entry of entries) {
+          if (!(entry.target instanceof HTMLElement)) continue;
+          const id = entry.target.dataset.topologyNode;
+          const height = entry.target.offsetHeight;
+          if (id && height > 0 && previous[id] !== height) {
+            if (next === previous) next = { ...previous };
+            next[id] = height;
+          }
         }
-      }
-      return next;
+        return next;
+      });
     });
-  }, [defaultPositions]);
+    elements.forEach((element) => observer.observe(element, { box: 'border-box' }));
+    return () => observer.disconnect();
+  }, [nodes]);
+
+  const defaultPositions = useMemo(() => {
+    const result: Record<string, { x: number; y: number }> = {};
+    const nextY = { network: 48, service: 40, resource: 48 };
+    for (const node of nodes) {
+      const column = node.kind === 'network' ? 'network' : node.kind === 'service' ? 'service' : 'resource';
+      const x = column === 'network' ? 40 : column === 'service' ? 350 : 710;
+      result[node.id] = { x, y: nextY[column] };
+      nextY[column] += (nodeHeights[node.id] || DEFAULT_NODE_HEIGHT[node.kind]) + NODE_GAP;
+    }
+    return result;
+  }, [nodes, nodeHeights]);
+
+  const positions = useMemo(() => {
+    const result = { ...defaultPositions };
+    for (const id of Object.keys(result)) {
+      if (manualPositions[id]) result[id] = manualPositions[id];
+    }
+    return result;
+  }, [defaultPositions, manualPositions]);
+
+  const canvasHeight = useMemo(() => nodes.reduce(
+    (height, node) => Math.max(
+      height, positions[node.id].y + (nodeHeights[node.id] || DEFAULT_NODE_HEIGHT[node.kind]) + 48
+    ), 520
+  ), [nodes, nodeHeights, positions]);
+
+  useEffect(() => {
+    const nodeIds = new Set(nodes.map((node) => node.id));
+    setManualPositions((previous) => {
+      const retained = Object.entries(previous).filter(([id]) => nodeIds.has(id));
+      return retained.length === Object.keys(previous).length ? previous : Object.fromEntries(retained);
+    });
+    setNodeHeights((previous) => {
+      const retained = Object.entries(previous).filter(([id]) => nodeIds.has(id));
+      return retained.length === Object.keys(previous).length ? previous : Object.fromEntries(retained);
+    });
+  }, [nodes]);
 
   useEffect(() => {
     if (!dragging) {
@@ -309,7 +331,7 @@ export const TopologyView: React.FC<{
       const rect = canvasRef.current.getBoundingClientRect();
       const x = Math.max(12, ev.clientX - rect.left - dragging.offsetX);
       const y = Math.max(12, ev.clientY - rect.top - dragging.offsetY);
-      setPositions((prev) => ({
+      setManualPositions((prev) => ({
         ...prev,
         [dragging.id]: { x, y },
       }));
@@ -349,7 +371,7 @@ export const TopologyView: React.FC<{
     >
       {/* Legend Bar */}
       <div className="bg-panel-card border border-panel-border rounded-xl px-4 py-2.5 flex items-center justify-between gap-4 flex-wrap text-xs">
-        <div className="flex items-center gap-4 flex-wrap">
+        <div className="flex min-w-0 max-w-full items-center gap-4 flex-wrap">
           <span className="flex items-center gap-1.5 text-text-secondary">
             <span className="w-2 h-2 rounded-full bg-violet-400" /> {t.topology.network}
           </span>
@@ -366,16 +388,16 @@ export const TopologyView: React.FC<{
             <span className="w-2 h-2 rounded-full bg-slate-400" /> {t.topology.envFile}
           </span>
           {activePodName && (
-            <span className="px-2 py-0.5 rounded-full bg-violet-500/10 border border-violet-500/20 text-violet-300 font-mono">
+            <span className="max-w-full break-all px-2 py-0.5 rounded-full bg-violet-500/10 border border-violet-500/20 text-violet-300 font-mono">
               {fmt(t.topology.activePod, { name: activePodName })}
             </span>
           )}
         </div>
-        <div className="flex items-center gap-3">
-          <span className="text-text-muted">{t.topology.hint}</span>
+        <div className="flex min-w-0 max-w-full flex-wrap items-center gap-3">
+          <span className="min-w-0 break-words text-text-muted">{t.topology.hint}</span>
           <button
             type="button"
-            onClick={() => setPositions(defaultPositions)}
+            onClick={() => setManualPositions({})}
             className="px-2.5 py-1 rounded-lg border border-panel-border bg-white/[0.02] text-text-secondary hover:text-text-primary hover:bg-white/[0.06] transition-colors"
           >
             {t.topology.rearrange}
@@ -422,7 +444,7 @@ export const TopologyView: React.FC<{
                 const x1 = p1.x + NODE_WIDTH[fromNode.kind] / 2;
                 const y1 = p1.y;
                 const x2 = p2.x + NODE_WIDTH[toNode.kind] / 2;
-                const y2 = p2.y + NODE_HEIGHT[toNode.kind];
+                const y2 = p2.y + (nodeHeights[toNode.id] || DEFAULT_NODE_HEIGHT[toNode.kind]);
                 const ctrlX = Math.max(x1, x2) + 65;
                 const d = `M ${x1} ${y1 + 20} C ${ctrlX} ${y1 + 20}, ${ctrlX} ${y2 - 20}, ${x2} ${y2}`;
                 return (
@@ -440,9 +462,9 @@ export const TopologyView: React.FC<{
               }
 
               const startX = p1.x + NODE_WIDTH[fromNode.kind];
-              const startY = p1.y + NODE_HEIGHT[fromNode.kind] / 2;
+              const startY = p1.y + (nodeHeights[fromNode.id] || DEFAULT_NODE_HEIGHT[fromNode.kind]) / 2;
               const endX = p2.x;
-              const endY = p2.y + NODE_HEIGHT[toNode.kind] / 2;
+              const endY = p2.y + (nodeHeights[toNode.id] || DEFAULT_NODE_HEIGHT[toNode.kind]) / 2;
               const midX = (startX + endX) / 2;
               const d = `M ${startX} ${startY} C ${midX} ${startY}, ${midX} ${endY}, ${endX} ${endY}`;
               const color =
@@ -476,6 +498,7 @@ export const TopologyView: React.FC<{
             return (
               <div
                 key={node.id}
+                data-topology-node={node.id}
                 onMouseDown={(ev) => {
                   if (ev.button !== 0) {
                     return;

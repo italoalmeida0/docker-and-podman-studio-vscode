@@ -68,10 +68,19 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+main button svg {
+  flex-shrink: 0;
+}
+
 .studio-page-header {
   flex-shrink: 0;
   max-height: 45%;
   overflow: auto;
+}
+
+.studio-image-meta,
+.studio-resource-form {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 8rem), 1fr));
 }
 
 @media (max-width: 1279px) {
@@ -91,6 +100,41 @@ body {
   main .grid-cols-3,
   main .grid-cols-4 {
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 319px) {
+  /* Keep nested panels usable when VS Code leaves very little width. */
+  main .p-3,
+  main .p-3\.5,
+  main .p-4,
+  main .p-5 {
+    padding: 0.5rem;
+  }
+
+  main .p-8 {
+    padding: 0.75rem;
+  }
+
+  main .px-3,
+  main .px-3\.5,
+  main .px-4,
+  main .px-5 {
+    padding-left: 0.5rem;
+    padding-right: 0.5rem;
+  }
+
+  .studio-page-header > * {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  main :where(.flex, .grid) > * {
+    min-width: 0;
+  }
+
+  main :where(h1, h2, h3, p, label, dt, dd, div, span, button) {
+    overflow-wrap: anywhere;
   }
 }
 
