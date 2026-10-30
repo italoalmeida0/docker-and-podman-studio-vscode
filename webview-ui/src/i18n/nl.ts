@@ -81,7 +81,7 @@ export const nl: TranslationDict = {
     overviewSection: 'OVERZICHT',
     resourcesSection: 'BRONNEN',
     systemSection: 'SYSTEEM',
-    dashboard: 'Dashboard & Engine',
+    dashboard: 'Systeem & Engine',
     compose: 'Compose Studio',
     pods: 'Pods',
     containers: 'Containers',
@@ -97,7 +97,7 @@ export const nl: TranslationDict = {
   },
 
   dashboard: {
-    title: 'Dashboard & {engine} Engine',
+    title: 'Systeem & {engine} Engine',
     subtitleDocker: 'Gecombineerd overzicht van Docker Engine, Contexten, Compose-stacks, Containers, Images, Volumes en Netwerken',
     subtitlePodman: 'Gecombineerd overzicht van Podman Machine, Pods, Compose-stacks, Containers, Images, Volumes en Netwerken',
     openComposeBtn: 'Open Compose Studio',

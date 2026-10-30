@@ -81,7 +81,7 @@ export const hi: TranslationDict = {
     overviewSection: 'अवलोकन',
     resourcesSection: 'संसाधन',
     systemSection: 'सिस्टम',
-    dashboard: 'डैशबोर्ड और इंजन',
+    dashboard: 'सिस्टम और इंजन',
     compose: 'Compose Studio',
     pods: 'Pod',
     containers: 'कंटेनर',
@@ -97,7 +97,7 @@ export const hi: TranslationDict = {
   },
 
   dashboard: {
-    title: 'डैशबोर्ड और {engine} इंजन',
+    title: 'सिस्टम और {engine} इंजन',
     subtitleDocker: 'Docker इंजन, कॉन्टेक्स्ट, Compose स्टैक, कंटेनर, इमेज, वॉल्यूम और नेटवर्क का एकीकृत अवलोकन',
     subtitlePodman: 'Podman Machine, Pod, Compose स्टैक, कंटेनर, इमेज, वॉल्यूम और नेटवर्क का एकीकृत अवलोकन',
     openComposeBtn: 'Compose Studio खोलें',

@@ -532,7 +532,7 @@ function resetEngineContext(state: StudioState) {
 }
 
 export const useStudioStore = create<StudioState>((set) => ({
-  activePage: 'compose',
+  activePage: 'dashboard',
   setActivePage: (activePage) => set({ activePage }),
 
   engine: 'docker',

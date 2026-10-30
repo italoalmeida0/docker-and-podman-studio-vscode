@@ -81,7 +81,7 @@ export const zhTW: TranslationDict = {
     overviewSection: '總覽',
     resourcesSection: '資源',
     systemSection: '系統',
-    dashboard: '儀表板與引擎',
+    dashboard: '系統與引擎',
     compose: 'Compose Studio',
     pods: 'Pod',
     containers: '容器',
@@ -97,7 +97,7 @@ export const zhTW: TranslationDict = {
   },
 
   dashboard: {
-    title: '儀表板與 {engine} 引擎',
+    title: '系統與 {engine} 引擎',
     subtitleDocker: 'Docker 引擎、Context 環境、Compose 堆疊、容器、映像檔、資料卷與網路的整合總覽',
     subtitlePodman: 'Podman Machine、Pod、Compose 堆疊、容器、映像檔、資料卷與網路的整合總覽',
     openComposeBtn: '開啟 Compose Studio',

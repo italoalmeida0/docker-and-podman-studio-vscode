@@ -132,3 +132,12 @@ test('the status bar uses the contributed brand icon in every engine state', () 
   }
   statusBar.dispose();
 });
+
+test('the Studio opens on System & Engine with the renamed navigation label', () => {
+  const { useStudioStore } = loadModule(path.join('webview-ui', 'src', 'store.ts'));
+  const { en } = loadModule(path.join('webview-ui', 'src', 'i18n', 'en.ts'));
+
+  assert.equal(useStudioStore.getInitialState().activePage, 'dashboard');
+  assert.equal(en.sidebar.dashboard, 'System & Engine');
+  assert.equal(en.dashboard.title, 'System & {engine} Engine');
+});

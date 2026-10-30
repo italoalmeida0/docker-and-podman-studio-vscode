@@ -81,7 +81,7 @@ export const zhCN: TranslationDict = {
     overviewSection: '概览',
     resourcesSection: '资源',
     systemSection: '系统',
-    dashboard: '仪表盘与引擎',
+    dashboard: '系统与引擎',
     compose: 'Compose Studio',
     pods: 'Pod',
     containers: '容器',
@@ -97,7 +97,7 @@ export const zhCN: TranslationDict = {
   },
 
   dashboard: {
-    title: '仪表盘与 {engine} 引擎',
+    title: '系统与 {engine} 引擎',
     subtitleDocker: 'Docker 引擎、上下文、Compose 栈、容器、镜像、数据卷与网络的统一概览',
     subtitlePodman: 'Podman Machine、Pod、Compose 栈、容器、镜像、数据卷与网络的统一概览',
     openComposeBtn: '打开 Compose Studio',

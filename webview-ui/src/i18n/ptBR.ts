@@ -81,7 +81,7 @@ export const ptBR: TranslationDict = {
     overviewSection: 'VISÃO GERAL',
     resourcesSection: 'RECURSOS',
     systemSection: 'SISTEMA',
-    dashboard: 'Painel & Engine',
+    dashboard: 'Sistema & Engine',
     compose: 'Compose Studio',
     pods: 'Pods',
     containers: 'Contêineres',
@@ -97,7 +97,7 @@ export const ptBR: TranslationDict = {
   },
 
   dashboard: {
-    title: 'Painel & Engine {engine}',
+    title: 'Sistema & Engine {engine}',
     subtitleDocker: 'Visão geral unificada do Docker Engine, Contextos, Stacks Compose, Contêineres, Imagens, Volumes e Redes',
     subtitlePodman: 'Visão geral unificada da Podman Machine, Pods, Stacks Compose, Contêineres, Imagens, Volumes e Redes',
     openComposeBtn: 'Abrir Compose Studio',

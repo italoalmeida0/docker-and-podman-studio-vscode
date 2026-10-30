@@ -81,7 +81,7 @@ export const uk: TranslationDict = {
     overviewSection: 'ОГЛЯД',
     resourcesSection: 'РЕСУРСИ',
     systemSection: 'СИСТЕМА',
-    dashboard: 'Панель і рушій',
+    dashboard: 'Система і рушій',
     compose: 'Compose Studio',
     pods: 'Поди',
     containers: 'Контейнери',
@@ -97,7 +97,7 @@ export const uk: TranslationDict = {
   },
 
   dashboard: {
-    title: 'Панель керування та рушій {engine}',
+    title: 'Система та рушій {engine}',
     subtitleDocker: 'Єдиний огляд рушія Docker, контекстів, стеків Compose, контейнерів, образів, томів і мереж',
     subtitlePodman: 'Єдиний огляд Podman Machine, подів, стеків Compose, контейнерів, образів, томів і мереж',
     openComposeBtn: 'Відкрити Compose Studio',

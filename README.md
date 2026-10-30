@@ -41,7 +41,7 @@ The screenshots show VS Code connected to a real Podman demonstration project. R
 
 ## Visual Tour
 
-### 1. Unified Engine Dashboard, Docker Contexts & Storage Analytics
+### 1. Unified System & Engine, Docker Contexts & Storage Analytics
 Review resource counts, **Podman Machine** status, and storage usage at a glance. In Docker mode, inspect and switch between available local or remote **Docker Contexts**.
 
 ![Studio dashboard with the Podman engine active](resources/screenshots/02-dual-engine-dashboard.png)
@@ -146,7 +146,7 @@ Only the CLI for your selected engine is required:
 - **For Podman Mode**:
   - **Podman CLI** and **Podman Compose** (`podman-compose` or `podman compose`). Provider capabilities vary; the isolated lifecycle and scaling tests have been exercised with Podman 6.1.4 and podman-compose 1.6.0 on Windows.
   - Compose status requires a provider that supports `ps --all -q`, or `podman-compose`, whose `ps -q` includes stopped containers. Studio reports an error instead of silently omitting stopped containers when it cannot establish this.
-  - *Windows / macOS*: An initialized Podman Machine (`podman machine init`), manageable directly from the Studio Dashboard.
+  - *Windows / macOS*: An initialized Podman Machine (`podman machine init`), manageable directly from the Studio System & Engine page.
   - *Windows*: Configure a native executable or a PowerShell script for Podman and Compose. `.cmd` and `.bat` wrappers are rejected for Podman commands because their shell argument handling cannot safely preserve arbitrary input. PowerShell execution policies still apply.
 
 ---

@@ -79,7 +79,7 @@ export const en = {
     overviewSection: 'OVERVIEW',
     resourcesSection: 'RESOURCES',
     systemSection: 'SYSTEM',
-    dashboard: 'Dashboard & Engine',
+    dashboard: 'System & Engine',
     compose: 'Compose Studio',
     pods: 'Pods',
     containers: 'Containers',
@@ -95,7 +95,7 @@ export const en = {
   },
 
   dashboard: {
-    title: 'Dashboard & {engine} Engine',
+    title: 'System & {engine} Engine',
     subtitleDocker: 'Unified overview of Docker Engine, Contexts, Compose Stacks, Containers, Images, Volumes, and Networks',
     subtitlePodman: 'Unified overview of Podman Machine, Pods, Compose Stacks, Containers, Images, Volumes, and Networks',
     openComposeBtn: 'Open Compose Studio',

@@ -81,7 +81,7 @@ export const tr: TranslationDict = {
     overviewSection: 'GENEL BAKIŞ',
     resourcesSection: 'KAYNAKLAR',
     systemSection: 'SİSTEM',
-    dashboard: 'Panel ve Motor',
+    dashboard: 'Sistem ve Motor',
     compose: 'Compose Studio',
     pods: 'Podlar',
     containers: 'Konteynerler',
@@ -97,7 +97,7 @@ export const tr: TranslationDict = {
   },
 
   dashboard: {
-    title: 'Gösterge Paneli ve {engine} Motoru',
+    title: 'Sistem ve {engine} Motoru',
     subtitleDocker: 'Docker Motoru, Bağlamlar, Compose Yığınları, Konteynerler, İmajlar, Birimler ve Ağlar için birleşik genel bakış',
     subtitlePodman: 'Podman Machine, Podlar, Compose Yığınları, Konteynerler, İmajlar, Birimler ve Ağlar için birleşik genel bakış',
     openComposeBtn: 'Compose Studio’yu Aç',
