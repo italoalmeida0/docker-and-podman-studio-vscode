@@ -159,6 +159,30 @@ test('resource removal revalidates identity, protects in-use resources and repor
   assert.ok(calls.every((call) => call.options.engineOverride === 'podman'));
 });
 
+test('resource removal stops after a timeout during recheck or deletion', async () => {
+  for (const phase of ['inspect', 'rm']) {
+    const service = new PodmanService();
+    service.listVolumes = async () => [
+      { name: 'first', created: 'one', usage: 'unused' },
+      { name: 'second', created: 'two', usage: 'unused' },
+    ];
+    const calls = [];
+    service.runEngineCommand = async (args) => {
+      calls.push(args);
+      if (args[1] === phase) {
+        return { ...failed('Execution timed out (300s)'), errorCode: 'ETIMEDOUT' };
+      }
+      return ok(JSON.stringify([{ Name: 'first', CreatedAt: 'one' }]));
+    };
+    const results = await service.removeResourceSelection('volume', [
+      { name: 'first', identity: 'one' }, { name: 'second', identity: 'two' },
+    ], 'podman');
+    assert.equal(results.length, 1);
+    assert.equal(results[0].result.errorCode, 'ETIMEDOUT');
+    assert.equal(calls.some((args) => args.at(-1) === 'second'), false);
+  }
+});
+
 test('resource removal refuses a volume replaced after the initial check', async () => {
   const service = new PodmanService();
   service.listVolumes = async () => [{ name: 'replaced', created: 'old', usage: 'unused' }];
@@ -290,6 +314,38 @@ test('Compose selected removal reports partial failures and does not retry faile
   assert.match(result.stdout, /app-a[\s\S]*app-c/);
   assert.match(result.stderr, /app-b: stop denied/);
   assert.equal(calls.filter((args) => args.at(-1) === id('b')).length, 1);
+  assert.deepEqual([result.completed, result.total], [2, 3]);
+});
+
+test('Compose selected removal stops on timeout and reports unattempted targets', async () => {
+  const service = new PodmanService();
+  const file = path.join(__dirname, 'fixtures', 'compose-project-name.yaml');
+  const replicas = ['a', 'b', 'c'].map((character) => ({
+    fullId: id(character), name: `app-${character}`, service: 'app',
+  }));
+  service.composePs = async () => replicas;
+  service.runComposeCommand = async () => ok(fs.readFileSync(file, 'utf8'));
+  const calls = [];
+  service.runEngineCommand = async (args) => {
+    calls.push(args);
+    if (args[1] === 'inspect') return ok(args.slice(4).map((containerId) => `${containerId} []`).join('\n'));
+    if (args[1] === 'stop' && args.at(-1) === id('b')) {
+      return { ...failed('Execution timed out (300s)'), errorCode: 'ETIMEDOUT' };
+    }
+    return ok();
+  };
+  const events = [];
+  const result = await service.withCommandProgress((event) => events.push(event), () =>
+    service.composeRemoveServices(file, ['app'])
+  );
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, 'ETIMEDOUT');
+  assert.deepEqual([result.completed, result.total], [1, 3]);
+  assert.match(result.stderr, /app-b: Execution timed out/);
+  assert.equal(calls.some((args) => args[1] !== 'inspect' && args.at(-1) === id('c')), false);
+  assert.deepEqual(events.filter((event) => event.type === 'step').at(-1), {
+    type: 'step', completed: 2, total: 3, current: undefined,
+  });
 });
 
 test('Compose selected removal removes dependent containers before their dependencies', async (t) => {
@@ -460,7 +516,10 @@ test('progress tokens, engine changes and error banners remain consistent', () =
   assert.deepEqual(useStudioStore.getState().composeContainers, []);
   store.showBanner('error', 'failure');
   store.showBanner('success', 'later success');
-  assert.equal(useStudioStore.getState().banner.message, 'failure');
+  const banners = useStudioStore.getState().banners;
+  assert.deepEqual(banners.map((banner) => banner.message), ['failure', 'later success']);
+  store.dismissBanner(banners[1].id);
+  assert.deepEqual(useStudioStore.getState().banners.map((banner) => banner.message), ['failure']);
 });
 
 test('engine messages wait for settings and ignore stale responses from another engine', () => {

@@ -443,6 +443,7 @@ test('native Compose down confirms deletion and marks a failed command as failed
   let choice;
   vscode.window.showWarningMessage = async () => choice;
   const errors = [];
+  const output = [];
   vscode.window.showErrorMessage = async (message) => { errors.push(message); };
   let downCalls = 0;
   const manager = new NativeCommandsManager({
@@ -450,15 +451,28 @@ test('native Compose down confirms deletion and marks a failed command as failed
       downCalls++;
       return { success: false, stdout: '', stderr: 'provider failed', exitCode: 1 };
     },
-  }, { registerFile: async () => {} }, { startPolling() {} }, async () => {});
+    composeStop: async () => ({
+      success: false, stdout: '', stderr: 'provider timed out', exitCode: 1,
+      errorCode: 'ETIMEDOUT', completed: 1, total: 3,
+    }),
+    withCommandProgress: (_report, task) => task(),
+  }, { registerFile: async () => {} }, { startPolling() {} }, async () => {},
+  async (_key, _label, task) => task(() => {}),
+  { appendLine: (line) => output.push(line), show() {} });
 
   await manager.handleComposeAction('down', { fsPath: 'compose.yaml' });
   assert.equal(downCalls, 0);
   choice = 'Yes';
   await manager.handleComposeAction('down', { fsPath: 'compose.yaml' });
   assert.equal(downCalls, 1);
-  assert.match(errors[0], /provider failed/);
+  assert.doesNotMatch(errors[0], /provider failed/);
+  assert.match(output.join('\n'), /provider failed/);
   assert.match(statusItems[1].text, /\$\(error\)/);
+  await manager.handleComposeAction('stop', { fsPath: 'compose.yaml' });
+  assert.match(errors[1], /1 of 3 items succeeded/i);
+  assert.match(errors[1], /may still be running/i);
+  assert.doesNotMatch(errors[1], /provider timed out/);
+  assert.match(output.join('\n'), /provider timed out/);
 });
 
 test('webview busy state tracks concurrent operations and repeated keys', () => {

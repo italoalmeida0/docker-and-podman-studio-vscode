@@ -21,6 +21,7 @@ import {
 import { SelectionBar, useResourceSelection } from '../components/ResourceSelection';
 import { useI18n } from '../i18n';
 import { PodmanImage, useStudioStore } from '../store';
+import { useActionRequest } from '../useActionRequest';
 import { useVsCodeMessaging } from '../vscode';
 
 function imageRemovalName(image: PodmanImage): string {
@@ -39,6 +40,7 @@ export const ImagesPage: React.FC = () => {
     dockerfileSelection,
     settings,
     operationInProgress,
+    operationsInProgress,
   } = useStudioStore();
 
   const [pullName, setPullName] = useState('');
@@ -63,6 +65,10 @@ export const ImagesPage: React.FC = () => {
   const [runImageTarget, setRunImageTarget] = useState<PodmanImage | null>(null);
   const [runContainerName, setRunContainerName] = useState('');
   const [runPorts, setRunPorts] = useState('');
+  const pullImage = useActionRequest('image:pull', () => setPullName(''));
+  const buildImage = useActionRequest('image:build', () => setShowBuildModal(false));
+  const pushImage = useActionRequest('image:push', () => setPushTargetImage(null));
+  const runImage = useActionRequest('container:create', () => setRunImageTarget(null));
 
   useEffect(() => {
     if (dockerfileSelection) {
@@ -111,11 +117,10 @@ export const ImagesPage: React.FC = () => {
   };
 
   const handlePull = () => {
-    if (!pullName.trim()) {
+    if (!pullName.trim() || busy || pullImage.pending) {
       return;
     }
-    postMessage('image:pull', { imageName: pullName.trim() });
-    setPullName('');
+    pullImage.run({ imageName: pullName.trim() });
   };
 
   const openPushModal = (img: PodmanImage) => {
@@ -149,7 +154,8 @@ export const ImagesPage: React.FC = () => {
           />
           <ActionPillButton
             label={t.common.refresh}
-            loading={busy}
+            loading={Boolean(operationsInProgress['list-images'] || operationsInProgress['refresh-all'])}
+            disabled={busy}
             icon={<RefreshCw className="w-3.5 h-3.5" />}
             onClick={() => postMessage('images:list')}
           />
@@ -164,6 +170,7 @@ export const ImagesPage: React.FC = () => {
             <input
               type="text"
               value={pullName}
+              disabled={pullImage.pending}
               onChange={(e) => setPullName(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
@@ -177,7 +184,7 @@ export const ImagesPage: React.FC = () => {
           <ActionPillButton
             label={t.images.pullBtn}
             variant="primary"
-            loading={operationInProgress === 'pulling'}
+            loading={pullImage.pending || operationInProgress === 'pulling'}
             loadingLabel={t.common.downloadingOp}
             disabled={!pullName.trim() || busy}
             icon={<Download className="w-3.5 h-3.5" />}
@@ -369,21 +376,24 @@ export const ImagesPage: React.FC = () => {
         <Modal
           title={fmt(t.images.buildModalTitle, { cmd: engineCmd })}
           subtitle={t.images.buildModalSubtitle}
+          feedback
+          lockFields={buildImage.pending}
           onClose={() => setShowBuildModal(false)}
           footer={
             <>
-              <ActionPillButton label={t.common.cancel} onClick={() => setShowBuildModal(false)} />
+              <ActionPillButton label={buildImage.pending ? t.common.close : t.common.cancel} onClick={() => setShowBuildModal(false)} />
               <ActionPillButton
                 label={t.images.startBuildBtn}
                 variant="podman"
-                disabled={!buildTag.trim() || !buildDockerfile.trim()}
+                loading={buildImage.pending}
+                disabled={!buildTag.trim() || !buildDockerfile.trim() || busy}
                 onClick={() => {
-                  postMessage('image:build', {
+                  if (busy) return;
+                  buildImage.run({
                     dockerfile: buildDockerfile.trim(),
                     contextDir: buildContext.trim() || '.',
                     tag: buildTag.trim(),
                   });
-                  setShowBuildModal(false);
                 }}
               />
             </>
@@ -446,20 +456,23 @@ export const ImagesPage: React.FC = () => {
             source: `${pushTargetImage.repository}:${pushTargetImage.tag}`,
           })}
           maxWidth="max-w-lg"
+          feedback
+          lockFields={pushImage.pending}
           onClose={() => setPushTargetImage(null)}
           footer={
             <>
-              <ActionPillButton label={t.common.cancel} onClick={() => setPushTargetImage(null)} />
+              <ActionPillButton label={pushImage.pending ? t.common.close : t.common.cancel} onClick={() => setPushTargetImage(null)} />
               <ActionPillButton
                 label={t.images.executePushBtn}
                 variant="podman"
-                disabled={!pushDestTag.trim()}
+                loading={pushImage.pending}
+                disabled={!pushDestTag.trim() || busy}
                 onClick={() => {
-                  postMessage('image:push', {
+                  if (busy) return;
+                  pushImage.run({
                     sourceImage: `${pushTargetImage.repository}:${pushTargetImage.tag}`,
                     targetTag: pushDestTag.trim(),
                   });
-                  setPushTargetImage(null);
                 }}
               />
             </>
@@ -486,15 +499,20 @@ export const ImagesPage: React.FC = () => {
           title={t.images.quickRunModalTitle}
           subtitle={`${runImageTarget.repository}:${runImageTarget.tag}`}
           maxWidth="max-w-lg"
+          feedback
+          lockFields={runImage.pending}
           onClose={() => setRunImageTarget(null)}
           footer={
             <>
-              <ActionPillButton label={t.common.cancel} onClick={() => setRunImageTarget(null)} />
+              <ActionPillButton label={runImage.pending ? t.common.close : t.common.cancel} onClick={() => setRunImageTarget(null)} />
               <ActionPillButton
                 label={t.images.runContainerBtn}
                 variant="podman"
+                loading={runImage.pending}
+                disabled={busy}
                 onClick={() => {
-                  postMessage('container:create', {
+                  if (busy) return;
+                  runImage.run({
                     image: `${runImageTarget.repository}:${runImageTarget.tag}`,
                     name: runContainerName.trim() || undefined,
                     ports: runPorts
@@ -502,7 +520,6 @@ export const ImagesPage: React.FC = () => {
                       .map((p) => p.trim())
                       .filter(Boolean),
                   });
-                  setRunImageTarget(null);
                 }}
               />
             </>

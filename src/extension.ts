@@ -25,11 +25,13 @@ import { ComposeDiagnosticsProvider } from './language/diagnosticsProvider';
 import { ComposeFileDetector, mergeComposeFileList } from './services/composeDetector';
 import { assertComposeEditBase, composeEditStatuses } from './services/composeEdit';
 import { LogProvider } from './services/logProvider';
+import { OperationProgress } from './services/operationProgress';
 import { PodmanService } from './services/podmanService';
 import { StatusProvider } from './services/statusProvider';
 import { YamlService } from './services/yamlService';
 import { buildComposeDocument, serializeComposeBuilder } from './shared/composeBuilder';
 import { composeLogKey } from './shared/composeLogs';
+import { appendOutputTail, OperationEvent } from './shared/operationFeedback';
 import {
   InboundCommand as M,
   OutboundCommand as A,
@@ -40,7 +42,7 @@ import {
   ResourceRemovalTarget,
   ServiceStatus,
 } from './types';
-import { showErrorWithCopy } from './ui/messageUtil';
+import { summarizeFailure } from './ui/messageUtil';
 import { StatusBarManager, withStatus } from './ui/statusBarManager';
 import {
   StudioLauncherViewProvider,
@@ -166,6 +168,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const launcherProvider = new StudioLauncherViewProvider();
   const statusBar = StatusBarManager.getInstance();
   const output = vscode.window.createOutputChannel('Docker and Podman Studio');
+  const progress = new OperationProgress(
+    (command, payload) => studioPanel.postMessage({ command, payload }),
+    (text) => output.append(text)
+  );
 
   let activeComposeFile: string | undefined;
   let activeComposeWatchers: vscode.FileSystemWatcher[] = [];
@@ -181,7 +187,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   let imageSearchGeneration = 0;
   let imageSearchController: AbortController | undefined;
   let lastRefreshError = '';
-  let nextOperationId = 0;
+  let settingsWriteDepth = 0;
+  let configChangeGeneration = 0;
+  let configRefreshPending = false;
+  let configRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   const listGenerations = new Map<string, number>();
   const composeOptionsKey = 'composeProjectOptions';
   const storedComposeOptions: Record<string, ComposeProjectOptions> =
@@ -218,23 +227,40 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     ]);
   }
 
-  function reportError(error: unknown): void {
+  function boundedDetails(details: string): string {
+    const tail = appendOutputTail('', details);
+    return tail.truncated ? `${bt('detailsTruncated')}\n\n${tail.text}` : tail.text;
+  }
+
+  function reportError(error: unknown, operation?: string, errorCode?: string, summary?: string): void {
     const message = error instanceof Error ? error.message : String(error);
-    output.appendLine(`[${new Date().toISOString()}] ${message}`);
-    studioPanel.postMessage({ command: A.ERROR, payload: { message } });
+    const details = error instanceof Error ? error.stack || message : message;
+    const userMessage = summary || summarizeFailure(message, errorCode, operation);
+    output.appendLine(`[${new Date().toISOString()}] ${operation ? `${operation}:\n` : ''}${details}`);
+    studioPanel.postMessage({
+      command: A.ERROR,
+      payload: { message: userMessage, details: boundedDetails(details) },
+    });
+    if (!studioPanel.isVisible()) {
+      const openOutput = bt('openOperationOutput');
+      void Promise.resolve(vscode.window.showErrorMessage(userMessage, openOutput)).then((choice) => {
+        if (choice === openOutput) output.show(true);
+      }).catch((failure: unknown) => {
+        output.appendLine(`[${new Date().toISOString()}] Could not show error details: ${String(failure)}`);
+      });
+    }
   }
 
   async function withStudioProgress<T>(
     key: string,
     label: string,
-    task: () => Promise<T>
+    task: (report: (event: OperationEvent) => void) => Promise<T>
   ): Promise<T> {
-    const id = String(++nextOperationId);
-    studioPanel.postMessage({ command: A.OPERATION_START, payload: { id, key, label } });
+    const id = progress.start(key, label);
     try {
-      return await task();
+      return await task((event) => progress.report(id, event));
     } finally {
-      studioPanel.postMessage({ command: A.OPERATION_END, payload: { id, key } });
+      progress.end(id);
     }
   }
 
@@ -773,20 +799,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       stdout?: string;
       stderr?: string;
       commandStr?: string;
+      errorCode?: string;
+      completed?: number;
+      total?: number;
     }>,
-    options?: { includeOutput?: boolean }
+    options?: { includeOutput?: boolean; requestId?: string }
   ): Promise<boolean> {
-    return withStudioProgress(opKey, label, async () => {
-      const res = await withStatus(label, task);
+    const success = await withStudioProgress(opKey, label, async (report) => {
+      const res = await withStatus(label, () => podman.withCommandProgress(report, task));
       if (!res.success) {
-        const msg = (
-          res.stderr || res.stdout || bt('engineFailedDefault', { engine: getEngineLabel() })
-        ).trim();
-        reportError(`${label}: ${msg}`);
-        if (res.stderr && res.stdout?.trim()) {
-          output.appendLine(res.stdout.trim());
-        }
-        void showErrorWithCopy(`${label}: ${msg}`, res.commandStr);
+        const details = [res.stderr?.trim(), res.stdout?.trim()].filter(Boolean).join('\n') ||
+          bt('engineFailedDefault', { engine: getEngineLabel() });
+        reportError(details, label, res.errorCode, summarizeFailure(details, res.errorCode, label, res));
         return false;
       }
       const details = options?.includeOutput
@@ -795,18 +819,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (details) {
         output.appendLine(`[${new Date().toISOString()}] ${label}:\n${details}`);
       }
-      const preview = details.length > 1200
-        ? `${details.slice(0, 1200)}\n${bt('cleanupResultsTruncated')}`
-        : details;
       studioPanel.postMessage({
         command: A.NOTIFICATION,
         payload: {
           type: 'success',
-          message: [bt('opCompleted', { op: label }), preview].filter(Boolean).join('\n'),
+          message: bt('opCompleted', { op: label }),
+          ...(details ? { details: boundedDetails(details) } : {}),
         },
       });
+      if (!studioPanel.isVisible()) {
+        void vscode.window.showInformationMessage(bt('opCompleted', { op: label }));
+      }
       return true;
     });
+    if (options?.requestId) {
+      studioPanel.postMessage({
+        command: A.ACTION_RESULT, requestId: options.requestId, payload: { success },
+      });
+    }
+    return success;
   }
 
   async function confirmPodmanAction(message: string, detail?: string): Promise<boolean> {
@@ -840,12 +871,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const failures = results.filter((item) => !item.result.success);
       return {
         success: failures.length === 0,
+        completed: results.length - failures.length,
+        total: ids.length,
+        errorCode: failures.find((item) => item.result.errorCode === 'ETIMEDOUT')?.result.errorCode ??
+          failures[0]?.result.errorCode,
         stdout: '',
         stderr: failures.length
           ? [
               bt('batchPartialFailure', {
                 completed: results.length - failures.length,
-                total: results.length,
+                total: ids.length,
               }),
               ...failures.map(
                 (item) =>
@@ -919,6 +954,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         const successes = results.filter((item) => item.result.success);
         return {
           success: failures.length === 0,
+          completed: successes.length,
+          total: unique.length,
+          errorCode: failures.find((item) => item.result.errorCode === 'ETIMEDOUT')?.result.errorCode ??
+            failures[0]?.result.errorCode,
           stdout: bt('removedResources', {
             count: successes.length,
             resource: resourceName,
@@ -926,7 +965,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           }),
           stderr: failures.length
             ? [
-                bt('batchPartialFailure', { completed: successes.length, total: results.length }),
+                bt('batchPartialFailure', { completed: successes.length, total: unique.length }),
                 ...failures.map((item) =>
                   `${item.name}: ${(item.result.stderr || item.result.stdout || `exit code ${item.result.exitCode}`).trim()}`
                 ),
@@ -979,7 +1018,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const generation = nextListGeneration(command);
     const isCurrent = () =>
       listGenerations.get(command) === generation && engineContextKey() === initialContext;
-    await withStudioProgress(`list-${resource}`, bt('loadingResources', { resource }), async () => {
+    await withStudioProgress(`list-${command.split(':')[0]}`, bt('loadingResources', { resource }), async () => {
       try {
         const items = await task();
         if (isCurrent()) {
@@ -1084,12 +1123,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           break;
         }
         case M.SYSTEM_INFO_GET: {
-          const info = await podman.getSystemInfo();
+          const info = await withStudioProgress('system-info', bt('loadingSystemInfo'), () =>
+            podman.getSystemInfo()
+          );
           studioPanel.postMessage({ command: A.SYSTEM_INFO_UPDATE, payload: info, engine });
           break;
         }
         case M.DISK_USAGE_GET: {
-          const df = await podman.getDiskUsage();
+          const df = await withStudioProgress('disk-usage', bt('loadingDiskUsage'), () =>
+            podman.getDiskUsage()
+          );
           studioPanel.postMessage({ command: A.DISK_USAGE_UPDATE, payload: df, engine });
           break;
         }
@@ -1105,7 +1148,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           }
           await notifyResult(
             'context-use',
-            `Docker Context Use ${payload.name}`,
+            bt('actionContextUse', { name: String(payload.name) }),
             () => podman.useDockerContext(String(payload.name))
           );
           await refreshAllStudioData();
@@ -1120,7 +1163,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         case M.MACHINE_START: {
           await notifyResult(
             'machine-start',
-            `Podman Machine Start ${payload.name || ''}`.trim(),
+            bt('actionMachineStart', { name: String(payload.name || '') }).trim(),
             () => podman.startMachine(payload.name)
           );
           await refreshAllStudioData();
@@ -1129,7 +1172,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         case M.MACHINE_STOP: {
           await notifyResult(
             'machine-stop',
-            `Podman Machine Stop ${payload.name || ''}`.trim(),
+            bt('actionMachineStop', { name: String(payload.name || '') }).trim(),
             () => podman.stopMachine(payload.name)
           );
           await refreshAllStudioData();
@@ -1138,7 +1181,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         case M.MACHINE_RESTART: {
           await notifyResult(
             'machine-restart',
-            `Podman Machine Restart ${payload.name || ''}`.trim(),
+            bt('actionMachineRestart', { name: String(payload.name || '') }).trim(),
             () => podman.restartMachine(payload.name)
           );
           await refreshAllStudioData();
@@ -1153,8 +1196,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         case M.POD_CREATE: {
           const ok = await notifyResult(
             'pod-create',
-            `Create Pod ${payload.name || ''}`.trim(),
-            () => podman.createPod(payload)
+            bt('actionPodCreate', { name: String(payload.name || '') }).trim(),
+            () => podman.createPod(payload),
+            { requestId: msg.requestId }
           );
           if (ok) {
             await refreshAllStudioData();
@@ -1162,21 +1206,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           break;
         }
         case M.POD_START: {
-          await notifyResult('pod-start', `Start Pod ${payload.podId}`, () =>
+          await notifyResult('pod-start', bt('actionPodStart', { name: String(payload.podId) }), () =>
             podman.startPod(payload.podId)
           );
           await refreshAllStudioData();
           break;
         }
         case M.POD_STOP: {
-          await notifyResult('pod-stop', `Stop Pod ${payload.podId}`, () =>
+          await notifyResult('pod-stop', bt('actionPodStop', { name: String(payload.podId) }), () =>
             podman.stopPod(payload.podId)
           );
           await refreshAllStudioData();
           break;
         }
         case M.POD_RESTART: {
-          await notifyResult('pod-restart', `Restart Pod ${payload.podId}`, () =>
+          await notifyResult('pod-restart', bt('actionPodRestart', { name: String(payload.podId) }), () =>
             podman.restartPod(payload.podId)
           );
           await refreshAllStudioData();
@@ -1188,7 +1232,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             throw new Error(bt('podsRequirePodmanError'));
           }
           const pause = msg.command === M.POD_PAUSE;
-          await notifyResult(pause ? 'pod-pause' : 'pod-unpause', `${pause ? 'Pause' : 'Resume'} Pod ${payload.podId}`, () =>
+          await notifyResult(
+            pause ? 'pod-pause' : 'pod-unpause',
+            bt(pause ? 'actionPodPause' : 'actionPodResume', { name: String(payload.podId) }),
+            () =>
             pause ? podman.pausePod(payload.podId) : podman.unpausePod(payload.podId)
           );
           await refreshAllStudioData();
@@ -1199,7 +1246,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           break;
         }
         case M.POD_REMOVE: {
-          await notifyResult('pod-remove', `Remove Pod ${payload.podId}`, () =>
+          await notifyResult('pod-remove', bt('actionPodRemove', { name: String(payload.podId) }), () =>
             podman.removePod(payload.podId, true)
           );
           await refreshAllStudioData();
@@ -1228,8 +1275,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         case M.CONTAINER_CREATE: {
           const ok = await notifyResult(
             'container-create',
-            `Create Container ${payload.name || payload.image}`,
-            () => podman.createContainer(payload)
+            bt('actionContainerCreate', { name: String(payload.name || payload.image || '') }),
+            () => podman.createContainer(payload),
+            { requestId: msg.requestId }
           );
           if (ok) {
             await refreshAllStudioData();
@@ -1237,21 +1285,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           break;
         }
         case M.CONTAINER_START: {
-          await notifyResult('container-start', `Start Container ${payload.containerId}`, () =>
+          await notifyResult('container-start', bt('actionContainerStart', { name: String(payload.containerId) }), () =>
             podman.startContainer(payload.containerId)
           );
           await refreshAllStudioData();
           break;
         }
         case M.CONTAINER_STOP: {
-          await notifyResult('container-stop', `Stop Container ${payload.containerId}`, () =>
+          await notifyResult('container-stop', bt('actionContainerStop', { name: String(payload.containerId) }), () =>
             podman.stopContainer(payload.containerId)
           );
           await refreshAllStudioData();
           break;
         }
         case M.CONTAINER_RESTART: {
-          await notifyResult('container-restart', `Restart Container ${payload.containerId}`, () =>
+          await notifyResult('container-restart', bt('actionContainerRestart', { name: String(payload.containerId) }), () =>
             podman.restartContainer(payload.containerId)
           );
           await refreshAllStudioData();
@@ -1265,7 +1313,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           const pause = msg.command === M.CONTAINER_PAUSE;
           await notifyResult(
             pause ? 'container-pause' : 'container-unpause',
-            `${pause ? 'Pause' : 'Resume'} Container ${payload.containerId}`,
+            bt(pause ? 'actionContainerPause' : 'actionContainerResume', { name: String(payload.containerId) }),
             () => pause
               ? podman.pauseContainer(payload.containerId)
               : podman.unpauseContainer(payload.containerId)
@@ -1278,7 +1326,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           break;
         }
         case M.CONTAINER_REMOVE: {
-          await notifyResult('container-remove', `Remove Container ${payload.containerId}`, () =>
+          await notifyResult('container-remove', bt('actionContainerRemove', { name: String(payload.containerId) }), () =>
             podman.removeContainer(payload.containerId, true)
           );
           await refreshAllStudioData();
@@ -1318,17 +1366,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
         case M.IMAGE_PULL: {
           if (!payload.imageName?.trim()) {
-            break;
+            throw new Error('Provide an image name before downloading.');
           }
-          await notifyResult('pulling', `Pull Image ${payload.imageName}`, () =>
-            podman.pullImage(payload.imageName)
+          await notifyResult('pulling', bt('actionImagePull', { name: String(payload.imageName) }), () =>
+            podman.pullImage(payload.imageName),
+            { requestId: msg.requestId }
           );
           await refreshResourceList(resourceLabel('image'), A.IMAGES_UPDATE, () => podman.listImages());
           break;
         }
         case M.IMAGE_BUILD: {
-          const ok = await notifyResult('image-build', `Build Image ${payload.tag}`, () =>
-            podman.buildImage(payload.dockerfile, payload.tag, payload.contextDir)
+          const ok = await notifyResult('image-build', bt('actionImageBuild', { name: String(payload.tag) }), () =>
+            podman.buildImage(payload.dockerfile, payload.tag, payload.contextDir),
+            { requestId: msg.requestId }
           );
           if (ok) {
             await refreshAllStudioData();
@@ -1338,8 +1388,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         case M.IMAGE_PUSH: {
           await notifyResult(
             'image-push',
-            `Push Image ${payload.targetTag || payload.sourceImage}`,
-            () => podman.pushImage(payload.sourceImage, payload.targetTag)
+            bt('actionImagePush', { name: String(payload.targetTag || payload.sourceImage) }),
+            () => podman.pushImage(payload.sourceImage, payload.targetTag),
+            { requestId: msg.requestId }
           );
           break;
         }
@@ -1350,7 +1401,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           ))) {
             break;
           }
-          await notifyResult('image-remove', `Remove Image ${payload.imageId}`, () =>
+          await notifyResult('image-remove', bt('actionImageRemove', { name: String(payload.imageId) }), () =>
             podman.removeImage(payload.imageId, engine === 'docker')
           );
           await refreshAllStudioData();
@@ -1381,7 +1432,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             break;
           }
           await notifyResult(
-            'prune-images', 'Prune Dangling Images',
+            'prune-images', bt('actionPruneImages'),
             () => podman.pruneDanglingImages(), { includeOutput: true }
           );
           await refreshAllStudioData();
@@ -1392,7 +1443,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             break;
           }
           await notifyResult(
-            'prune-all-images', 'Prune All Unused Images',
+            'prune-all-images', bt('actionPruneAllImages'),
             () => podman.pruneAllUnusedImages(), { includeOutput: true }
           );
           await refreshAllStudioData();
@@ -1406,7 +1457,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             break;
           }
           await notifyResult(
-            'prune-builder', `Clear ${engineLabel} Builder Cache`,
+            'prune-builder', bt('actionPruneBuilder', { engine: engineLabel }),
             () => podman.pruneBuilderCache(), { includeOutput: true }
           );
           await refreshAllStudioData();
@@ -1434,8 +1485,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           break;
         }
         case M.NETWORK_CREATE: {
-          const ok = await notifyResult('network-create', `Create Network ${payload.name}`, () =>
-            podman.createNetwork(payload)
+          const ok = await notifyResult('network-create', bt('actionNetworkCreate', { name: String(payload.name) }), () =>
+            podman.createNetwork(payload),
+            { requestId: msg.requestId }
           );
           if (ok) {
             await refreshAllStudioData();
@@ -1449,7 +1501,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           ))) {
             break;
           }
-          await notifyResult('network-remove', `Remove Network ${payload.networkName}`, () =>
+          await notifyResult('network-remove', bt('actionNetworkRemove', { name: String(payload.networkName) }), () =>
             podman.removeNetwork(payload.networkName, engine === 'docker')
           );
           await refreshAllStudioData();
@@ -1462,8 +1514,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           break;
         }
         case M.VOLUME_CREATE: {
-          const ok = await notifyResult('volume-create', `Create Volume ${payload.name}`, () =>
-            podman.createVolume(payload.name, payload.driver, payload.labels)
+          const ok = await notifyResult('volume-create', bt('actionVolumeCreate', { name: String(payload.name) }), () =>
+            podman.createVolume(payload.name, payload.driver, payload.labels),
+            { requestId: msg.requestId }
           );
           if (ok) {
             await refreshAllStudioData();
@@ -1477,7 +1530,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           ))) {
             break;
           }
-          await notifyResult('volume-remove', `Remove Volume ${payload.volumeName}`, () =>
+          await notifyResult('volume-remove', bt('actionVolumeRemove', { name: String(payload.volumeName) }), () =>
             podman.removeVolume(payload.volumeName, engine === 'docker')
           );
           await refreshAllStudioData();
@@ -1564,7 +1617,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
               throw new Error('Save or discard unsaved VS Code changes in the Compose project files before continuing.');
             }
           };
-          await withStudioProgress('compose-options', 'Validate Compose configuration', async () => {
+          await withStudioProgress('compose-options', bt('validateComposeConfig'), async () => {
             checkPrevious();
             const nextRevision = podman.getComposeProjectRevision(composeFile, next);
             const doc = await podman.resolveComposeDocument(composeFile, next);
@@ -1644,12 +1697,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           } catch (error) {
             if (generation === imageSearchGeneration) {
               const message = error instanceof Error ? error.message : String(error);
+              const label = bt('loadingResources', { resource: resourceLabel('image') });
+              reportError(error, label);
               studioPanel.postMessage({
-                command: A.COMPOSE_IMAGE_RESULTS, payload: { results: [], error: message },
+                command: A.COMPOSE_IMAGE_RESULTS,
+                payload: { results: [], error: summarizeFailure(message, undefined, label) },
               });
-              throw error;
-            }
-            if (!controller.signal.aborted) {
+            } else if (!controller.signal.aborted) {
               output.appendLine(`[${new Date().toISOString()}] Image search: ${String(error)}`);
             }
           } finally {
@@ -1685,7 +1739,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             break;
           }
           readComposeEditBase(composeFile, { ...payload, baseYaml: payload.rawYaml });
-          await notifyResult('start', `${engineLabel} Compose Up`, () =>
+          await notifyResult('start', bt('actionComposeUp', { engine: engineLabel }), () =>
             podman.composeUp(composeFile, payload)
           );
           await refreshAllStudioData();
@@ -1696,7 +1750,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             break;
           }
           assertComposeProjectContext(composeFile, payload, true);
-          await notifyResult('stop', `${engineLabel} Compose Stop`, () =>
+          await notifyResult('stop', bt('actionComposeStop', { engine: engineLabel }), () =>
             podman.composeStop(composeFile, payload?.services)
           );
           await refreshAllStudioData();
@@ -1722,11 +1776,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
               ? await podman.resolveComposeDocument(composeFile)
               : yamlService.parse(fs.readFileSync(composeFile, 'utf-8'));
             assertComposeProjectContext(composeFile, payload, true);
-            await notifyResult('down', `Remove Service ${payload.services.join(', ')}`, () =>
+            await notifyResult('down', bt('actionServiceRemove', { name: payload.services.join(', ') }), () =>
               podman.composeRemoveServices(composeFile, payload.services, doc)
             );
           } else {
-            await notifyResult('down', `${engineLabel} Compose Down`, () =>
+            await notifyResult('down', bt('actionComposeDown', { engine: engineLabel }), () =>
               podman.composeDown(composeFile, payload)
             );
           }
@@ -1738,7 +1792,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             break;
           }
           assertComposeProjectContext(composeFile, payload);
-          await notifyResult('restart', `${engineLabel} Compose Restart`, () =>
+          await notifyResult('restart', bt('actionComposeRestart', { engine: engineLabel }), () =>
             podman.composeRestart(composeFile, payload?.services)
           );
           await refreshAllStudioData();
@@ -1749,7 +1803,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             break;
           }
           readComposeEditBase(composeFile, { ...payload, baseYaml: payload.rawYaml });
-          await notifyResult(payload.noCache ? 'rebuild' : 'build', `${engineLabel} Compose ${payload.noCache ? 'Rebuild (no cache)' : 'Build'}`, () =>
+          await notifyResult(payload.noCache ? 'rebuild' : 'build',
+            bt(payload.noCache ? 'actionComposeRebuild' : 'actionComposeBuild', { engine: engineLabel }), () =>
             podman.composeBuild(composeFile, payload?.services, undefined, { noCache: payload.noCache === true }),
             { includeOutput: true }
           );
@@ -1761,7 +1816,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             break;
           }
           readComposeEditBase(composeFile, { ...payload, baseYaml: payload.rawYaml });
-          await notifyResult('build-up', `${engineLabel} Compose Build & Up`, () =>
+          await notifyResult('build-up', bt('actionComposeBuildUp', { engine: engineLabel }), () =>
             podman.composeBuildUp(composeFile, payload?.services),
             { includeOutput: true }
           );
@@ -1770,7 +1825,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
         case M.STACK_SCALE: {
           if (!composeFile || !payload.service || payload.replicas === undefined) {
-            break;
+            throw new Error('Select a Compose service and a replica count before scaling.');
           }
           assertComposeProjectContext(composeFile, payload);
           const replicas = typeof payload.replicas === 'number'
@@ -1780,53 +1835,65 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
               : NaN;
           let expectedContainerIds: string[] | undefined;
           let expectedComposeContent: string | undefined;
-          if (engine === 'podman') {
-            if (getConfig().engine !== 'podman') {
-              throw new Error('The active engine changed; refresh before scaling.');
+          const approved = await withStudioProgress('scale-check', bt('loadingComposeStatus'), async () => {
+            if (engine === 'podman') {
+              if (getConfig().engine !== 'podman') {
+                throw new Error('The active engine changed; refresh before scaling.');
+              }
+              if (typeof payload.service !== 'string' ||
+                  !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(payload.service) ||
+                  !Number.isSafeInteger(replicas) || replicas < 0) {
+                throw new Error('Compose scaling requires a valid service name and a non-negative integer.');
+              }
+              const initialSettings = getPodmanComposeSettingsKey();
+              expectedComposeContent = fs.readFileSync(composeFile, 'utf-8');
+              const doc = podman.hasCustomComposeProject(composeFile)
+                ? await podman.resolveComposeDocument(composeFile)
+                : yamlService.parse(expectedComposeContent);
+              assertComposeProjectContext(composeFile, payload);
+              if (!doc.services || !Object.prototype.hasOwnProperty.call(doc.services, payload.service)) {
+                throw new Error('The requested Compose service no longer exists. Refresh the project.');
+              }
+              const current = (await podman.composePs(composeFile, doc))
+                .filter((container) => container.service === payload.service);
+              expectedContainerIds = current.map((container) => container.fullId);
+              if (getPodmanComposeSettingsKey() !== initialSettings ||
+                  getActiveComposeFile() !== composeFile ||
+                  fs.readFileSync(composeFile, 'utf-8') !== expectedComposeContent) {
+                throw new Error('Compose settings or the file changed; refresh before scaling.');
+              }
+              assertComposeProjectContext(composeFile, payload);
+              if (current.length > replicas && !(await confirmPodmanAction(
+                bt('confirmScaleDown', {
+                  service: String(payload.service),
+                  count: current.length - replicas,
+                }),
+                bt('confirmScaleDataWarning')
+              ))) {
+                return false;
+              }
+              if (getPodmanComposeSettingsKey() !== initialSettings ||
+                  getActiveComposeFile() !== composeFile ||
+                  fs.readFileSync(composeFile, 'utf-8') !== expectedComposeContent) {
+                throw new Error('Compose settings or the file changed; refresh before scaling.');
+              }
+              assertComposeProjectContext(composeFile, payload);
             }
-            if (typeof payload.service !== 'string' ||
-                !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(payload.service) ||
-                !Number.isSafeInteger(replicas) || replicas < 0) {
-              throw new Error('Compose scaling requires a valid service name and a non-negative integer.');
+            return true;
+          });
+          if (!approved) {
+            if (msg.requestId) {
+              studioPanel.postMessage({
+                command: A.ACTION_RESULT, requestId: msg.requestId, payload: { success: false },
+              });
             }
-            const initialSettings = getPodmanComposeSettingsKey();
-            expectedComposeContent = fs.readFileSync(composeFile, 'utf-8');
-            const doc = podman.hasCustomComposeProject(composeFile)
-              ? await podman.resolveComposeDocument(composeFile)
-              : yamlService.parse(expectedComposeContent);
-            assertComposeProjectContext(composeFile, payload);
-            if (!doc.services || !Object.prototype.hasOwnProperty.call(doc.services, payload.service)) {
-              throw new Error('The requested Compose service no longer exists. Refresh the project.');
-            }
-            const current = (await podman.composePs(composeFile, doc))
-              .filter((container) => container.service === payload.service);
-            expectedContainerIds = current.map((container) => container.fullId);
-            if (getPodmanComposeSettingsKey() !== initialSettings ||
-                getActiveComposeFile() !== composeFile ||
-                fs.readFileSync(composeFile, 'utf-8') !== expectedComposeContent) {
-              throw new Error('Compose settings or the file changed; refresh before scaling.');
-            }
-            assertComposeProjectContext(composeFile, payload);
-            if (current.length > replicas && !(await confirmPodmanAction(
-              bt('confirmScaleDown', {
-                service: String(payload.service),
-                count: current.length - replicas,
-              }),
-              bt('confirmScaleDataWarning')
-            ))) {
-              break;
-            }
-            if (getPodmanComposeSettingsKey() !== initialSettings ||
-                getActiveComposeFile() !== composeFile ||
-                fs.readFileSync(composeFile, 'utf-8') !== expectedComposeContent) {
-              throw new Error('Compose settings or the file changed; refresh before scaling.');
-            }
-            assertComposeProjectContext(composeFile, payload);
+            break;
           }
-          await notifyResult('scale', `Scale ${payload.service}`, () =>
+          await notifyResult('scale', bt('actionComposeScale', { name: String(payload.service) }), () =>
             podman.composeScale(
               composeFile, payload.service, replicas, undefined, expectedContainerIds, expectedComposeContent
-            )
+            ),
+            { requestId: msg.requestId }
           );
           await refreshAllStudioData();
           break;
@@ -1979,7 +2046,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           break;
         }
         case M.STATUS_GET: {
-          const statuses = await statusProvider.poll();
+          const statuses = await withStudioProgress('compose-status', bt('loadingComposeStatus'), () =>
+            statusProvider.poll()
+          );
           studioPanel.postMessage({ command: A.CONTAINERS_UPDATE, payload: statuses });
           break;
         }
@@ -2014,80 +2083,110 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           break;
         }
         case M.SETTINGS_SAVE: {
-          const target = vscode.workspace.workspaceFolders?.length
-            ? vscode.ConfigurationTarget.Workspace
-            : vscode.ConfigurationTarget.Global;
-          const wsCfg = vscode.workspace.getConfiguration(CONFIG_SECTION);
-          if (payload.language !== undefined) {
-            await updateLanguageSetting(payload.language as LanguageSetting);
-          }
-          if (payload.engine !== undefined) {
-            await updateEngineSetting(payload.engine === 'podman' ? 'podman' : 'docker');
-          }
-          const keys: Array<keyof StudioConfig> = [
-            'dockerPath',
-            'podmanPath',
-            'composePath',
-            'composeCommandStyle',
-            'inPod',
-            'machineName',
-            'pollingInterval',
-            'logBufferSize',
-            'autoDetectFiles',
-            'confirmDeletions',
-            'logsOutput',
-            'enablePushCommand',
-            'pushDefaultRegistry',
-            'registryProvider',
-            'registryUrl',
-            'registryAuthType',
-            'registryUsername',
-            'registryAutoLogin',
-          ];
-          for (const k of keys) {
-            if (payload[k] !== undefined) {
-              await wsCfg.update(k, payload[k], target);
-            }
-          }
-          if (payload.registrySecret) {
-            await context.secrets.store(SECRET_KEY, String(payload.registrySecret));
-          }
-          const activeCfg = getConfig();
-          const cmd = activeCfg.engine;
-          const effectiveSecret =
-            payload.registrySecret || (await context.secrets.get(SECRET_KEY));
-          const autoLogin =
-            payload.registryAutoLogin !== undefined
-              ? Boolean(payload.registryAutoLogin)
-              : activeCfg.registryAutoLogin;
-
-          if (autoLogin && effectiveSecret && activeCfg.registryAuthType !== 'bearer') {
-            const username =
-              activeCfg.registryUsername || (activeCfg.registryProvider === 'ecr' ? 'AWS' : '');
-            const host = defaultHostForProvider(
-              activeCfg.registryProvider,
-              activeCfg.registryUrl || ''
-            );
-            if (username && host) {
-              const loginRes = await podman.loginRegistry(
-                host, username, effectiveSecret, activeCfg.engine
-              );
-              if (!loginRes.success) {
-                throw new Error(
-                  bt('settingsSavedLoginFailed', { cmd, err: loginRes.stderr })
-                );
+          settingsWriteDepth++;
+          try {
+            const success = await withStudioProgress('settings-save', bt('savingSettings'), async () => {
+              if (payload.longOperationTimeoutMinutes !== undefined &&
+                  (!Number.isInteger(payload.longOperationTimeoutMinutes) ||
+                   payload.longOperationTimeoutMinutes < 5 || payload.longOperationTimeoutMinutes > 720)) {
+                throw new Error(bt('invalidLongOperationTimeout'));
               }
+
+              const target = vscode.workspace.workspaceFolders?.length
+                ? vscode.ConfigurationTarget.Workspace
+                : vscode.ConfigurationTarget.Global;
+              const wsCfg = vscode.workspace.getConfiguration(CONFIG_SECTION);
+              if (payload.language !== undefined) {
+                await updateLanguageSetting(payload.language as LanguageSetting);
+              }
+              if (payload.engine !== undefined) {
+                await updateEngineSetting(payload.engine === 'podman' ? 'podman' : 'docker');
+              }
+              const keys: Array<keyof StudioConfig> = [
+                'dockerPath',
+                'podmanPath',
+                'composePath',
+                'composeCommandStyle',
+                'inPod',
+                'machineName',
+                'pollingInterval',
+                'logBufferSize',
+                'longOperationTimeoutMinutes',
+                'autoDetectFiles',
+                'confirmDeletions',
+                'logsOutput',
+                'enablePushCommand',
+                'pushDefaultRegistry',
+                'registryProvider',
+                'registryUrl',
+                'registryAuthType',
+                'registryUsername',
+                'registryAutoLogin',
+              ];
+              for (const k of keys) {
+                if (payload[k] !== undefined) {
+                  await wsCfg.update(k, payload[k], target);
+                }
+              }
+              if (payload.registrySecret) {
+                await context.secrets.store(SECRET_KEY, String(payload.registrySecret));
+              }
+              const activeCfg = getConfig();
+              const cmd = activeCfg.engine;
+              const effectiveSecret = String(
+                payload.registrySecret || (await context.secrets.get(SECRET_KEY)) || ''
+              );
+              const autoLogin =
+                payload.registryAutoLogin !== undefined
+                  ? Boolean(payload.registryAutoLogin)
+                  : activeCfg.registryAutoLogin;
+
+              if (autoLogin && effectiveSecret && activeCfg.registryAuthType !== 'bearer') {
+                const username =
+                  activeCfg.registryUsername || (activeCfg.registryProvider === 'ecr' ? 'AWS' : '');
+                const host = defaultHostForProvider(
+                  activeCfg.registryProvider,
+                  activeCfg.registryUrl || ''
+                );
+                if (username && host) {
+                  const loginRes = await podman.loginRegistry(
+                    host, username, effectiveSecret, activeCfg.engine
+                  );
+                  if (!loginRes.success) {
+                    const details = (loginRes.stderr || loginRes.stdout || bt('failureGeneric'))
+                      .split(effectiveSecret).join('[redacted]');
+                    await sendSettingsState();
+                    reportError(details, undefined, loginRes.errorCode, bt('settingsSavedLoginIssue', { cmd }));
+                    return false;
+                  }
+                }
+              }
+
+              statusBar.refreshLocalization();
+              launcherProvider.refreshLocalization();
+              const savedConfigGeneration = configChangeGeneration;
+              const currentFile = getActiveComposeFile();
+              if (currentFile) {
+                statusProvider.startPolling(currentFile, getConfig().pollingInterval);
+              }
+              await sendSettingsState();
+              await refreshAllStudioData();
+              studioPanel.postMessage({
+                command: A.NOTIFICATION,
+                payload: { type: 'success', message: bt('settingsSavedToast') },
+              });
+              if (configChangeGeneration === savedConfigGeneration) configRefreshPending = false;
+              return true;
+            });
+            if (msg.requestId) {
+              studioPanel.postMessage({
+                command: A.ACTION_RESULT, requestId: msg.requestId, payload: { success },
+              });
             }
+          } finally {
+            settingsWriteDepth--;
+            if (configRefreshPending) queueConfigRefresh();
           }
-          statusBar.refreshLocalization();
-          launcherProvider.refreshLocalization();
-          await sendSettingsState();
-          await refreshAllStudioData();
-          studioPanel.postMessage({
-            command: A.NOTIFICATION,
-            payload: { type: 'success', message: bt('settingsSavedToast') },
-          });
-          vscode.window.showInformationMessage(bt('settingsSavedToast'));
           break;
         }
         case M.SETTINGS_TEST: {
@@ -2145,46 +2244,64 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
               const safeMessage = secret ? message.split(secret).join('[redacted]') : message;
-              reportError(safeMessage);
+              reportError(safeMessage, bt('testingRegistry'));
               studioPanel.postMessage({
                 command: A.SETTINGS_TEST_RESULT,
-                payload: { ok: false, message: safeMessage },
+                payload: { ok: false, message: summarizeFailure(safeMessage, undefined, bt('testingRegistry')) },
               });
             }
           });
           break;
         }
         case M.SETTINGS_DISCONNECT: {
-          const merged = { ...getConfig(), ...payload };
-          const cmd = merged.engine === 'podman' ? 'podman' : 'docker';
-          const host = defaultHostForProvider(merged.registryProvider, merged.registryUrl || '');
-          const shouldLogout = Boolean(merged.registryAutoLogin && host);
-          try {
-            await disconnectRegistryCredentials(podman, context.secrets, host, cmd, shouldLogout);
-            await sendSettingsState();
+          const success = await withStudioProgress('registry-disconnect', bt('disconnectingRegistry'), async () => {
+            const merged = { ...getConfig(), ...payload };
+            const cmd = merged.engine === 'podman' ? 'podman' : 'docker';
+            const host = defaultHostForProvider(merged.registryProvider, merged.registryUrl || '');
+            const shouldLogout = Boolean(merged.registryAutoLogin && host);
+            try {
+              await disconnectRegistryCredentials(podman, context.secrets, host, cmd, shouldLogout);
+              await sendSettingsState();
+              studioPanel.postMessage({
+                command: A.SETTINGS_TEST_RESULT,
+                payload: {
+                  ok: true,
+                  message: shouldLogout
+                    ? bt('registryDisconnected', { cmd })
+                    : bt('registryCredentialsRemoved'),
+                },
+              });
+              return true;
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              studioPanel.postMessage({
+                command: A.SETTINGS_TEST_RESULT,
+                payload: { ok: false, message: summarizeFailure(message, undefined, bt('disconnectingRegistry')) },
+              });
+              reportError(error, bt('disconnectingRegistry'));
+              return false;
+            }
+          });
+          if (msg.requestId) {
             studioPanel.postMessage({
-              command: A.SETTINGS_TEST_RESULT,
-              payload: {
-                ok: true,
-                message: shouldLogout
-                  ? bt('registryDisconnected', { cmd })
-                  : bt('registryCredentialsRemoved'),
-              },
+              command: A.ACTION_RESULT, requestId: msg.requestId, payload: { success },
             });
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            studioPanel.postMessage({
-              command: A.SETTINGS_TEST_RESULT,
-              payload: { ok: false, message },
-            });
-            reportError(error);
           }
           break;
         }
         case M.SETTINGS_RESET_PATHS: {
-          await resetEnginePaths();
-          await sendSettingsState();
-          vscode.window.showInformationMessage(bt('pathsResetToast'));
+          await withStudioProgress('settings-reset', bt('resettingPaths'), async () => {
+            await resetEnginePaths();
+            await sendSettingsState();
+            studioPanel.postMessage({
+              command: A.NOTIFICATION, payload: { type: 'success', message: bt('pathsResetToast') },
+            });
+          });
+          if (msg.requestId) {
+            studioPanel.postMessage({
+              command: A.ACTION_RESULT, requestId: msg.requestId, payload: { success: true },
+            });
+          }
           break;
         }
         case M.OPEN_EXTERNAL: {
@@ -2204,8 +2321,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           output.show(true);
           break;
         }
+        case M.OUTPUT_COPY: {
+          if (typeof payload.text === 'string') {
+            await vscode.env.clipboard.writeText(payload.text);
+          }
+          break;
+        }
+        case M.OPERATIONS_GET: {
+          studioPanel.postMessage({ command: A.OPERATION_SNAPSHOT, payload: progress.snapshot() });
+          break;
+        }
       }
     } catch (err: unknown) {
+      if (msg.requestId) {
+        studioPanel.postMessage({
+          command: A.ACTION_RESULT, requestId: msg.requestId, payload: { success: false },
+        });
+      }
       if (msg.command === M.COMPOSE_FILE_CREATE && msg.requestId) {
         studioPanel.postMessage({ command: A.COMPOSE_CREATE_FAILED, requestId: msg.requestId });
       }
@@ -2231,17 +2363,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
   logProvider.onError((message) => reportError(message));
 
-  const cfgDisposable = onConfigChange(() => {
-    const updated = getConfig();
-    const currentFile = getActiveComposeFile();
-    if (currentFile) {
-      statusProvider.startPolling(currentFile, updated.pollingInterval);
-    }
-    statusBar.refreshLocalization();
-    launcherProvider.refreshLocalization();
-    void sendSettingsState();
-    void refreshAllStudioData();
-  });
+  function queueConfigRefresh(): void {
+    configChangeGeneration++;
+    configRefreshPending = true;
+    if (settingsWriteDepth > 0) return;
+    if (configRefreshTimer) clearTimeout(configRefreshTimer);
+    configRefreshTimer = setTimeout(() => {
+      configRefreshTimer = undefined;
+      if (settingsWriteDepth > 0) return;
+      configRefreshPending = false;
+      const updated = getConfig();
+      const currentFile = getActiveComposeFile();
+      if (currentFile) {
+        statusProvider.startPolling(currentFile, updated.pollingInterval);
+      }
+      statusBar.refreshLocalization();
+      launcherProvider.refreshLocalization();
+      void Promise.all([sendSettingsState(), refreshAllStudioData()]).catch((error) => reportError(error));
+    }, 250);
+  }
+
+  const cfgDisposable = onConfigChange(queueConfigRefresh);
 
   const completionDisp = vscode.languages.registerCompletionItemProvider(
     COMPOSE_DOCUMENT_SELECTOR,
@@ -2255,7 +2397,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     podman,
     fileDetector,
     statusProvider,
-    refreshAllStudioData
+    refreshAllStudioData,
+    withStudioProgress,
+    output
   );
   nativeCommands.register(context);
 
@@ -2287,6 +2431,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     logProvider,
     studioPanel,
     cfgDisposable,
+    { dispose: () => { if (configRefreshTimer) clearTimeout(configRefreshTimer); } },
     completionDisp,
     diagnosticsDisp,
     nativeCommands,

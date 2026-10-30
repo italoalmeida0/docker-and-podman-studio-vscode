@@ -1,5 +1,9 @@
 import { useEffect } from 'react';
 import { create } from 'zustand';
+import {
+  appendOutputTail,
+  OperationSnapshot,
+} from '../../src/shared/operationFeedback';
 import { ComposeDraft, ComposeServiceDraft, syncComposeDraft } from './composeDrafts';
 import { createEngineMessageGate, StudioMessage, useVsCodeMessaging } from './vscode';
 
@@ -318,6 +322,7 @@ export interface StudioSettings {
   machineName: string;
   pollingInterval: number;
   logBufferSize: number;
+  longOperationTimeoutMinutes: number;
   autoDetectFiles: boolean;
   confirmDeletions: boolean;
   logsOutput: 'studio' | 'outputChannel' | 'terminal';
@@ -345,7 +350,34 @@ export interface BannerToast {
   id: number;
   type: 'success' | 'error' | 'info';
   message: string;
+  details?: string;
 }
+
+export interface StudioOperation {
+  id: string;
+  key: string;
+  label: string;
+  startedAt: number;
+  output: string;
+  outputTruncated: boolean;
+  lastOutputAt?: number;
+  completed?: number;
+  total?: number;
+  current?: string;
+}
+
+function operationFromSnapshot(snapshot: OperationSnapshot): StudioOperation {
+  const now = Date.now();
+  return {
+    ...snapshot,
+    startedAt: now - Math.max(0, snapshot.elapsedMs || 0),
+    lastOutputAt: snapshot.lastOutputElapsedMs === undefined
+      ? undefined
+      : now - Math.max(0, snapshot.lastOutputElapsedMs),
+  };
+}
+
+let nextBannerId = 0;
 
 interface StudioState {
   activePage: PageId;
@@ -377,7 +409,7 @@ interface StudioState {
   operationInProgress: string | null;
   operationsInProgress: Record<string, number>;
   operationLabels: Record<string, string>;
-  operationTokens: Record<string, { key: string; label: string }>;
+  operationTokens: Record<string, StudioOperation>;
 
   // Engine resources
   systemInfo: PodmanSystemInfo | null;
@@ -401,7 +433,8 @@ interface StudioState {
   settingsTestResult: { ok: boolean; message: string } | null;
 
   // Banner/Notifications
-  banner: BannerToast | null;
+  banners: BannerToast[];
+  pausedBanners: Record<number, number>;
 
   // Setters
   setComposeUpdate: (
@@ -421,8 +454,11 @@ interface StudioState {
   setSelectedDirectory: (dir: string | null) => void;
   setImageResults: (results: ImageSearchResult[]) => void;
   setImageSearchError: (message: string | null) => void;
-  beginOperation: (op: string, label?: string, id?: string) => void;
+  beginOperation: (op: string, label?: string, id?: string, snapshot?: OperationSnapshot) => void;
   endOperation: (op: string, id?: string) => void;
+  setOperationSnapshot: (operations: OperationSnapshot[]) => void;
+  appendOperationOutput: (id: string, text: string, truncated?: boolean) => void;
+  setOperationStep: (id: string, completed: number, total: number, current?: string) => void;
   setSystemInfo: (info: PodmanSystemInfo | null) => void;
   setDiskUsage: (items: PodmanDiskUsageItem[]) => void;
   setDockerContexts: (contexts: DockerContextItem[]) => void;
@@ -440,8 +476,10 @@ interface StudioState {
   setLogFilter: (filter: string) => void;
   setSettings: (settings: StudioSettings) => void;
   setSettingsTestResult: (res: { ok: boolean; message: string } | null) => void;
-  showBanner: (type: 'success' | 'error' | 'info', message: string) => void;
-  dismissBanner: () => void;
+  showBanner: (type: 'success' | 'error' | 'info', message: string, details?: string) => void;
+  dismissBanner: (id?: number) => void;
+  pauseBanner: (id: number) => void;
+  resumeBanner: (id: number) => void;
 }
 
 function emptyEngineResources() {
@@ -525,7 +563,8 @@ export const useStudioStore = create<StudioState>((set) => ({
 
   settings: null,
   settingsTestResult: null,
-  banner: null,
+  banners: [],
+  pausedBanners: {},
 
   setComposeUpdate: (document, activeFile, rawYaml, composeParseError, serviceFragments, project) =>
     set((state) => ({
@@ -566,7 +605,7 @@ export const useStudioStore = create<StudioState>((set) => ({
   setSelectedDirectory: (selectedDirectory) => set({ selectedDirectory }),
   setImageResults: (imageResults) => set({ imageResults }),
   setImageSearchError: (imageSearchError) => set({ imageSearchError }),
-  beginOperation: (op, label, id) =>
+  beginOperation: (op, label, id, snapshot) =>
     set((state) => {
       if (id && state.operationTokens[id]) {
         return state;
@@ -578,9 +617,57 @@ export const useStudioStore = create<StudioState>((set) => ({
         },
         operationLabels: { ...state.operationLabels, [op]: label || op },
         operationTokens: id
-          ? { ...state.operationTokens, [id]: { key: op, label: label || op } }
+          ? {
+              ...state.operationTokens,
+              [id]: snapshot ? operationFromSnapshot(snapshot) : {
+                id, key: op, label: label || op, startedAt: Date.now(),
+                output: '', outputTruncated: false,
+              },
+            }
           : state.operationTokens,
         operationInProgress: state.operationInProgress || op,
+      };
+    }),
+  setOperationSnapshot: (operations) =>
+    set(() => {
+      const operationsInProgress: Record<string, number> = {};
+      const operationLabels: Record<string, string> = {};
+      const operationTokens: Record<string, StudioOperation> = {};
+      for (const snapshot of operations) {
+        const operation = operationFromSnapshot(snapshot);
+        operationTokens[operation.id] = operation;
+        operationsInProgress[operation.key] = (operationsInProgress[operation.key] || 0) + 1;
+        operationLabels[operation.key] = operation.label;
+      }
+      return {
+        operationsInProgress, operationLabels, operationTokens,
+        operationInProgress: Object.keys(operationsInProgress)[0] || null,
+      };
+    }),
+  appendOperationOutput: (id, text, truncated) =>
+    set((state) => {
+      const operation = state.operationTokens[id];
+      if (!operation) return state;
+      const tail = appendOutputTail(operation.output, text);
+      return {
+        operationTokens: {
+          ...state.operationTokens,
+          [id]: {
+            ...operation, output: tail.text, lastOutputAt: Date.now(),
+            outputTruncated: operation.outputTruncated || tail.truncated || Boolean(truncated),
+          },
+        },
+      };
+    }),
+  setOperationStep: (id, completed, total, current) =>
+    set((state) => {
+      const operation = state.operationTokens[id];
+      if (!operation || total < 1 || completed < 0 || completed > total) return state;
+      return {
+        operationTokens: {
+          ...state.operationTokens,
+          [id]: { ...operation, completed, total, current },
+        },
       };
     }),
   endOperation: (op, id) =>
@@ -647,13 +734,33 @@ export const useStudioStore = create<StudioState>((set) => ({
       };
     }),
   setSettingsTestResult: (settingsTestResult) => set({ settingsTestResult }),
-  showBanner: (type, message) =>
-    set((state) =>
-      state.banner?.type === 'error' && type !== 'error'
-        ? state
-        : { banner: { id: Date.now(), type, message } }
-    ),
-  dismissBanner: () => set({ banner: null }),
+  showBanner: (type, message, details) =>
+    set((state) => {
+      if (type === 'error' && state.banners.some((banner) =>
+        banner.type === type && banner.message === message && banner.details === details)) {
+        return state;
+      }
+      return { banners: [...state.banners, { id: ++nextBannerId, type, message, details }] };
+    }),
+  dismissBanner: (id) =>
+    set((state) => {
+      const pausedBanners = { ...state.pausedBanners };
+      if (id === undefined) return { banners: [], pausedBanners: {} };
+      delete pausedBanners[id];
+      return { banners: state.banners.filter((banner) => banner.id !== id), pausedBanners };
+    }),
+  pauseBanner: (id) =>
+    set((state) => state.banners.some((banner) => banner.id === id)
+      ? { pausedBanners: { ...state.pausedBanners, [id]: (state.pausedBanners[id] || 0) + 1 } }
+      : state),
+  resumeBanner: (id) =>
+    set((state) => {
+      if (!state.pausedBanners[id]) return state;
+      const pausedBanners = { ...state.pausedBanners };
+      if (pausedBanners[id] > 1) pausedBanners[id]--;
+      else delete pausedBanners[id];
+      return { pausedBanners };
+    }),
 }));
 
 export function useStudioMessageBridge(): void {
@@ -708,7 +815,7 @@ export function useStudioMessageBridge(): void {
         case 'operation:start':
           if (p && typeof p === 'object' && typeof p.key === 'string') {
             store.beginOperation(p.key, typeof p.label === 'string' ? p.label : undefined,
-              typeof p.id === 'string' ? p.id : undefined);
+              typeof p.id === 'string' ? p.id : undefined, p as OperationSnapshot);
           } else {
             store.beginOperation(String(p || 'busy'));
           }
@@ -720,14 +827,36 @@ export function useStudioMessageBridge(): void {
             store.endOperation(String(p || 'busy'));
           }
           break;
+        case 'operation:snapshot':
+          if (Array.isArray(p)) {
+            store.setOperationSnapshot(p.filter((operation): operation is OperationSnapshot =>
+              operation && typeof operation.id === 'string' && typeof operation.key === 'string' &&
+              typeof operation.label === 'string' && typeof operation.output === 'string'
+            ));
+          }
+          break;
+        case 'operation:output':
+          if (typeof p?.id === 'string' && typeof p?.text === 'string') {
+            store.appendOperationOutput(p.id, p.text, p.outputTruncated === true);
+          }
+          break;
+        case 'operation:step':
+          if (typeof p?.id === 'string' && Number.isInteger(p?.completed) &&
+              Number.isInteger(p?.total)) {
+            store.setOperationStep(p.id, p.completed, p.total,
+              typeof p.current === 'string' ? p.current : undefined);
+          }
+          break;
         case 'notification':
           if (p?.message) {
-            store.showBanner(p.type || 'success', String(p.message));
+            store.showBanner(p.type || 'success', String(p.message),
+              typeof p.details === 'string' ? p.details : undefined);
           }
           break;
         case 'error':
           if (p?.message) {
-            store.showBanner('error', String(p.message));
+            store.showBanner('error', String(p.message),
+              typeof p.details === 'string' ? p.details : undefined);
           }
           break;
         case 'system:info:update':
@@ -800,6 +929,7 @@ export function useStudioMessageBridge(): void {
 
     postMessage('dashboard:get');
     postMessage('settings:get');
+    postMessage('operations:get');
 
     return unsubscribe;
   }, [onMessage, postMessage]);

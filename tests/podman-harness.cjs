@@ -35,6 +35,7 @@ class EventEmitter {
 const vscode = {
   EventEmitter,
   StatusBarAlignment: { Left: 1 },
+  ProgressLocation: { Notification: 15 },
   env: { language: 'en' },
   workspace: {
     workspaceFolders: undefined,
@@ -49,6 +50,7 @@ const vscode = {
     showErrorMessage: async () => undefined,
     showInformationMessage: async () => undefined,
     showWarningMessage: async () => undefined,
+    withProgress: async (_options, task) => task({ report() {} }),
   },
 };
 

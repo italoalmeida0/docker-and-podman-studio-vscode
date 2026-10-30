@@ -19,7 +19,7 @@ import { useVsCodeMessaging } from '../vscode';
 export const ToolsPage: React.FC = () => {
   const { postMessage } = useVsCodeMessaging();
   const { t, fmt, engine, engineLabel, changeEngine } = useI18n();
-  const { operationInProgress, setActivePage } = useStudioStore();
+  const { operationInProgress, operationsInProgress, setActivePage } = useStudioStore();
   const busy = Boolean(operationInProgress);
   const isPodman = engine === 'podman';
   const accentText = isPodman ? 'text-accent-purple' : 'text-accent-blue';
@@ -72,30 +72,35 @@ export const ToolsPage: React.FC = () => {
             <div className="flex flex-wrap gap-2">
               <ActionPillButton
                 label={t.tools.pruneDanglingBtn}
+                loading={Boolean(operationsInProgress['prune-images'])}
                 disabled={busy}
                 icon={<Trash2 className="w-3.5 h-3.5" />}
                 onClick={() => postMessage('prune:images')}
               />
               <ActionPillButton
                 label={t.tools.pruneUnusedBtn}
+                loading={Boolean(operationsInProgress['prune-all-images'])}
                 disabled={busy}
                 icon={<Trash2 className="w-3.5 h-3.5" />}
                 onClick={() => postMessage('prune:all:images')}
               />
               <ActionPillButton
                 label={t.tools.pruneBuildCacheBtn}
+                loading={Boolean(operationsInProgress['prune-builder'])}
                 disabled={busy}
                 icon={<Trash2 className="w-3.5 h-3.5" />}
                 onClick={() => postMessage('prune:builder')}
               />
               <ActionPillButton
                 label={t.tools.pruneVolumesBtn}
+                loading={Boolean(operationsInProgress['inspect-volume'] || operationsInProgress['volume-remove-batch'])}
                 disabled={busy}
                 icon={<Trash2 className="w-3.5 h-3.5" />}
                 onClick={() => postMessage('prune:volumes')}
               />
               <ActionPillButton
                 label={`${t.sidebar.networks}: ${t.images.filterUnused}`}
+                loading={Boolean(operationsInProgress['inspect-network'] || operationsInProgress['network-remove-batch'])}
                 disabled={busy}
                 icon={<Trash2 className="w-3.5 h-3.5" />}
                 onClick={() => postMessage('prune:networks')}
@@ -114,6 +119,7 @@ export const ToolsPage: React.FC = () => {
               <ActionPillButton
                 label={fmt(t.tools.switchEngineBtn, { targetEngine: targetEngineLabel })}
                 variant="brand"
+                disabled={busy}
                 icon={<ArrowLeftRight className="w-3.5 h-3.5" />}
                 onClick={() => changeEngine(isPodman ? 'docker' : 'podman')}
               />
@@ -128,6 +134,7 @@ export const ToolsPage: React.FC = () => {
               {isPodman && (
                 <ActionPillButton
                   label={t.tools.restartMachineBtn}
+                  loading={Boolean(operationsInProgress['machine-restart'])}
                   disabled={busy}
                   icon={<RotateCcw className="w-3.5 h-3.5" />}
                   onClick={() => postMessage('machine:restart', {})}
@@ -135,6 +142,8 @@ export const ToolsPage: React.FC = () => {
               )}
               <ActionPillButton
                 label={t.tools.resetPathsBtn}
+                loading={Boolean(operationsInProgress['settings-reset'])}
+                disabled={busy}
                 icon={<RotateCcw className="w-3.5 h-3.5" />}
                 onClick={() => postMessage('settings:resetPaths')}
               />

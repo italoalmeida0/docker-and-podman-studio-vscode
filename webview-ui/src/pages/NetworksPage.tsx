@@ -10,6 +10,7 @@ import {
 import { SelectionBar, useResourceSelection } from '../components/ResourceSelection';
 import { useI18n } from '../i18n';
 import { PodmanNetwork, useStudioStore } from '../store';
+import { useActionRequest } from '../useActionRequest';
 import { useVsCodeMessaging } from '../vscode';
 
 const networkSelectionKey = (network: PodmanNetwork) => `${network.name}\0${network.fullId}`;
@@ -17,7 +18,7 @@ const networkSelectionKey = (network: PodmanNetwork) => `${network.name}\0${netw
 export const NetworksPage: React.FC = () => {
   const { postMessage } = useVsCodeMessaging();
   const { t, fmt, engine, engineLabel, engineCmd } = useI18n();
-  const { networks, operationInProgress } = useStudioStore();
+  const { networks, operationInProgress, operationsInProgress } = useStudioStore();
 
   const [search, setSearch] = useState('');
   const [usageFilter, setUsageFilter] = useState<'all' | 'unused' | 'inUse'>('all');
@@ -27,6 +28,11 @@ export const NetworksPage: React.FC = () => {
   const [netSubnet, setNetSubnet] = useState('');
   const [netInternal, setNetInternal] = useState(false);
   const [netIpv6, setNetIpv6] = useState(false);
+  const createNetwork = useActionRequest('network:create', () => {
+    setNetName('');
+    setNetSubnet('');
+    setShowCreate(false);
+  });
 
   const busy = Boolean(operationInProgress);
 
@@ -86,7 +92,8 @@ export const NetworksPage: React.FC = () => {
           />
           <ActionPillButton
             label={t.common.refresh}
-            loading={busy}
+            loading={Boolean(operationsInProgress['list-networks'] || operationsInProgress['refresh-all'])}
+            disabled={busy}
             icon={<RefreshCw className="w-3.5 h-3.5" />}
             onClick={() => postMessage('networks:list')}
           />
@@ -236,25 +243,26 @@ export const NetworksPage: React.FC = () => {
           title={fmt(t.networks.createModalTitle, { engine: engineLabel })}
           subtitle={`${engineCmd} network create`}
           maxWidth="max-w-lg"
+          feedback
+          lockFields={createNetwork.pending}
           onClose={() => setShowCreate(false)}
           footer={
             <>
-              <ActionPillButton label={t.common.cancel} onClick={() => setShowCreate(false)} />
+              <ActionPillButton label={createNetwork.pending ? t.common.close : t.common.cancel} onClick={() => setShowCreate(false)} />
               <ActionPillButton
                 label={t.networks.createNetworkBtn}
                 variant="podman"
-                disabled={!netName.trim()}
+                loading={createNetwork.pending}
+                disabled={!netName.trim() || busy}
                 onClick={() => {
-                  postMessage('network:create', {
+                  if (busy) return;
+                  createNetwork.run({
                     name: netName.trim(),
                     driver: netDriver,
                     subnet: netSubnet.trim() || undefined,
                     internal: netInternal,
                     ipv6: netIpv6,
                   });
-                  setNetName('');
-                  setNetSubnet('');
-                  setShowCreate(false);
                 }}
               />
             </>

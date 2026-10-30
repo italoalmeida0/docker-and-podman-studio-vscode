@@ -34,6 +34,7 @@
   "cfg.machineName": "Default Podman Machine VM name (Windows/macOS in Podman mode).",
   "cfg.pollingInterval": "Container status polling interval in milliseconds.",
   "cfg.logBufferSize": "Maximum number of log lines kept in memory.",
+  "cfg.longOperationTimeoutMinutes": "Maximum time in minutes for builds, image transfers, Compose Up, container creation, and Podman Machine start. If reached, Studio requests the command to stop; check the engine state before retrying.",
   "cfg.autoDetectFiles": "Automatically detect docker-compose.yml, compose.yml, and podman-compose.yml files in workspace and active containers.",
   "cfg.confirmDeletions": "Ask for confirmation before destructive delete or prune actions.",
   "cfg.logsOutput": "Default target for container logs ('studio', 'outputChannel', or 'terminal').",

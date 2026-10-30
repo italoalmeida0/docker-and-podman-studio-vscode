@@ -1,4 +1,5 @@
 import { ChildProcess, spawn } from 'child_process';
+import { AsyncLocalStorage } from 'async_hooks';
 import { createHash } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -6,6 +7,7 @@ import * as vscode from 'vscode';
 import { parse as parseYaml } from 'yaml';
 import { ContainerEngine, getConfig, getEngineLabel, getPodmanComposeSettingsKey } from '../config';
 import { collectComposeDependencies } from './composeDependencies';
+import { appendOutputTail, OperationEvent } from '../shared/operationFeedback';
 import {
   CommandResult,
   ComposeContainerStatus,
@@ -32,7 +34,7 @@ import {
 } from '../types';
 
 const QUERY_TIMEOUT_MS = 20_000;
-const ACTION_TIMEOUT_MS = 300_000; // 5 min for pulls/builds/machine start
+const MAX_CAPTURED_ACTION_OUTPUT = 2_000_000;
 const POWERSHELL_PAYLOAD = 'DOCKER_PODMAN_STUDIO_SCRIPT_ARGS';
 const POWERSHELL_COMMAND = [
   '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false);',
@@ -192,6 +194,38 @@ export interface ComposeLogStream {
 
 export class PodmanService {
   private readonly composeOptions = new Map<string, ComposeProjectOptions>();
+  private readonly progress = new AsyncLocalStorage<(event: OperationEvent) => void>();
+
+  public withCommandProgress<T>(
+    report: (event: OperationEvent) => void,
+    task: () => Promise<T>
+  ): Promise<T> {
+    return this.progress.run(report, task);
+  }
+
+  private reportStep(completed: number, total: number, current?: string): void {
+    this.progress.getStore()?.({ type: 'step', completed, total, current });
+  }
+
+  private longOperationTimeoutMs(): number {
+    const minutes = getConfig().longOperationTimeoutMinutes;
+    if (!Number.isInteger(minutes) || minutes < 5 || minutes > 720) {
+      throw new Error('The long operation timeout must be a whole number between 5 and 720 minutes.');
+    }
+    return minutes * 60_000;
+  }
+
+  private isProgressEngineCommand(args: string[]): boolean {
+    const [command, subcommand] = args;
+    if (['run', 'pull', 'build', 'push', 'tag'].includes(command)) return true;
+    return (
+      (command === 'machine' && ['start', 'stop'].includes(subcommand)) ||
+      (command === 'container' && ['start', 'stop', 'restart', 'pause', 'unpause', 'rm'].includes(subcommand)) ||
+      (command === 'pod' && ['create', 'start', 'stop', 'restart', 'pause', 'unpause', 'rm'].includes(subcommand)) ||
+      (['image', 'volume', 'network'].includes(command) && ['create', 'rm', 'prune'].includes(subcommand)) ||
+      (command === 'builder' && subcommand === 'prune')
+    );
+  }
 
   public getActiveEngine(): ContainerEngine {
     return getConfig().engine;
@@ -356,6 +390,7 @@ export class PodmanService {
       cwd: options?.cwd,
       stdin: options?.stdin,
       engine,
+      reportProgress: this.isProgressEngineCommand(args),
     });
   }
 
@@ -591,7 +626,7 @@ export class PodmanService {
   public async runComposeCommand(
     composeFile: string,
     subArgs: string[],
-    timeoutMs = ACTION_TIMEOUT_MS,
+    timeoutMs = this.longOperationTimeoutMs(),
     projectName?: string,
     optionsOverride?: ComposeProjectOptions
   ): Promise<CommandResult> {
@@ -601,6 +636,7 @@ export class PodmanService {
       cwd: inv.cwd,
       timeoutMs,
       engine: cfg.engine,
+      reportProgress: ['up', 'start', 'stop', 'restart', 'down', 'build'].includes(subArgs[0]),
     });
 
     // Smart fallback in 'auto' mode if standalone/plugin binary is missing
@@ -613,12 +649,14 @@ export class PodmanService {
         const fallback = this.buildComposeInvocation(composeFile, subArgs, projectName, 'plugin', optionsOverride);
         return this.spawnProcess(fallback.bin, fallback.args, {
           cwd: fallback.cwd, timeoutMs, engine: cfg.engine,
+          reportProgress: ['up', 'start', 'stop', 'restart', 'down', 'build'].includes(subArgs[0]),
         });
       }
       if (cfg.engine === 'docker' && errLower.includes('is not a docker command')) {
         const fallback = this.buildComposeInvocation(composeFile, subArgs, projectName, 'standalone', optionsOverride);
         return this.spawnProcess(fallback.bin, fallback.args, {
           cwd: fallback.cwd, timeoutMs, engine: cfg.engine,
+          reportProgress: ['up', 'start', 'stop', 'restart', 'down', 'build'].includes(subArgs[0]),
         });
       }
     }
@@ -655,11 +693,15 @@ export class PodmanService {
   private spawnProcess(
     bin: string,
     args: string[],
-    options: { cwd?: string; timeoutMs: number; stdin?: string; engine?: ContainerEngine }
+    options: {
+      cwd?: string; timeoutMs: number; stdin?: string; engine?: ContainerEngine;
+      reportProgress?: boolean;
+    }
   ): Promise<CommandResult> {
     return new Promise((resolve) => {
       const cmdStr = `${bin} ${args.map((a) => (a.includes(' ') ? `"${a}"` : a)).join(' ')}`;
       const engine = options.engine ?? this.getActiveEngine();
+      const report = options.reportProgress ? this.progress.getStore() : undefined;
       let child: ChildProcess;
       try {
         const invocation = this.getProcessInvocation(bin, args, engine);
@@ -669,7 +711,13 @@ export class PodmanService {
           cwd: options.cwd,
           windowsHide: true,
           shell: useShell,
-          env: invocation.env ? { ...process.env, ...invocation.env } : undefined,
+          env: invocation.env || report
+            ? {
+                ...process.env,
+                ...invocation.env,
+                ...(report ? { PYTHONUNBUFFERED: '1', BUILDKIT_PROGRESS: 'plain' } : {}),
+              }
+            : undefined,
         });
       } catch (err: any) {
         resolve({
@@ -685,22 +733,47 @@ export class PodmanService {
 
       let stdout = '';
       let stderr = '';
+      let stdoutTruncated = false;
+      let stderrTruncated = false;
+      let settled = false;
 
       child.stdout?.setEncoding('utf8');
       child.stderr?.setEncoding('utf8');
       child.stdout?.on('data', (chunk) => {
-        stdout += chunk.toString();
+        if (settled) return;
+        const text = chunk.toString();
+        if (report) {
+          const tail = appendOutputTail(stdout, text, MAX_CAPTURED_ACTION_OUTPUT);
+          stdout = tail.text;
+          stdoutTruncated ||= tail.truncated;
+          report({ type: 'output', text });
+        } else {
+          stdout += text;
+        }
       });
       child.stderr?.on('data', (chunk) => {
-        stderr += chunk.toString();
+        if (settled) return;
+        const text = chunk.toString();
+        if (report) {
+          const tail = appendOutputTail(stderr, text, MAX_CAPTURED_ACTION_OUTPUT);
+          stderr = tail.text;
+          stderrTruncated ||= tail.truncated;
+          report({ type: 'output', text });
+        } else {
+          stderr += text;
+        }
       });
 
+      const captured = (value: string, truncated: boolean) =>
+        truncated ? `[Earlier output truncated; see the Studio output channel for the full log.]\n${value}` : value;
       const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
         child.kill('SIGTERM');
         resolve({
           success: false,
-          stdout,
-          stderr: `${stderr}\nExecution timed out (${Math.round(options.timeoutMs / 1000)}s).`.trim(),
+          stdout: captured(stdout, stdoutTruncated),
+          stderr: `${captured(stderr, stderrTruncated)}\nExecution timed out (${Math.round(options.timeoutMs / 1000)}s). Studio requested the command to stop; check the engine state before retrying.`.trim(),
           exitCode: -1,
           commandStr: cmdStr,
           errorCode: 'ETIMEDOUT',
@@ -709,10 +782,12 @@ export class PodmanService {
 
       child.on('close', (code) => {
         clearTimeout(timer);
+        if (settled) return;
+        settled = true;
         resolve({
           success: code === 0,
-          stdout,
-          stderr,
+          stdout: captured(stdout, stdoutTruncated),
+          stderr: captured(stderr, stderrTruncated),
           exitCode: code ?? -1,
           commandStr: cmdStr,
         });
@@ -720,10 +795,12 @@ export class PodmanService {
 
       child.on('error', (err) => {
         clearTimeout(timer);
+        if (settled) return;
+        settled = true;
         resolve({
           success: false,
-          stdout,
-          stderr: err.message,
+          stdout: captured(stdout, stdoutTruncated),
+          stderr: [captured(stderr, stderrTruncated), err.message].filter(Boolean).join('\n'),
           exitCode: -1,
           commandStr: cmdStr,
           errorCode: (err as NodeJS.ErrnoException).code,
@@ -1069,7 +1146,7 @@ export class PodmanService {
   public async startMachine(name?: string): Promise<CommandResult> {
     const target = name || getConfig().machineName;
     return this.runEngineCommand(['machine', 'start', target], {
-      timeoutMs: ACTION_TIMEOUT_MS,
+      timeoutMs: this.longOperationTimeoutMs(),
       engineOverride: 'podman',
     });
   }
@@ -1077,7 +1154,7 @@ export class PodmanService {
   public async stopMachine(name?: string): Promise<CommandResult> {
     const target = name || getConfig().machineName;
     return this.runEngineCommand(['machine', 'stop', target], {
-      timeoutMs: ACTION_TIMEOUT_MS,
+      timeoutMs: this.longOperationTimeoutMs(),
       engineOverride: 'podman',
     });
   }
@@ -1160,42 +1237,42 @@ export class PodmanService {
       }
     }
     return this.runEngineCommand(args, {
-      timeoutMs: ACTION_TIMEOUT_MS,
+      timeoutMs: this.longOperationTimeoutMs(),
       engineOverride: 'podman',
     });
   }
 
   public async startPod(podId: string): Promise<CommandResult> {
     return this.runEngineCommand(['pod', 'start', podId], {
-      timeoutMs: ACTION_TIMEOUT_MS,
+      timeoutMs: this.longOperationTimeoutMs(),
       engineOverride: 'podman',
     });
   }
 
   public async stopPod(podId: string): Promise<CommandResult> {
     return this.runEngineCommand(['pod', 'stop', podId], {
-      timeoutMs: ACTION_TIMEOUT_MS,
+      timeoutMs: this.longOperationTimeoutMs(),
       engineOverride: 'podman',
     });
   }
 
   public async restartPod(podId: string): Promise<CommandResult> {
     return this.runEngineCommand(['pod', 'restart', podId], {
-      timeoutMs: ACTION_TIMEOUT_MS,
+      timeoutMs: this.longOperationTimeoutMs(),
       engineOverride: 'podman',
     });
   }
 
   public async pausePod(podId: string): Promise<CommandResult> {
     return this.runEngineCommand(['pod', 'pause', podId], {
-      timeoutMs: ACTION_TIMEOUT_MS,
+      timeoutMs: this.longOperationTimeoutMs(),
       engineOverride: 'podman',
     });
   }
 
   public async unpausePod(podId: string): Promise<CommandResult> {
     return this.runEngineCommand(['pod', 'unpause', podId], {
-      timeoutMs: ACTION_TIMEOUT_MS,
+      timeoutMs: this.longOperationTimeoutMs(),
       engineOverride: 'podman',
     });
   }
@@ -1207,7 +1284,7 @@ export class PodmanService {
     }
     args.push(podId);
     return this.runEngineCommand(args, {
-      timeoutMs: ACTION_TIMEOUT_MS,
+      timeoutMs: this.longOperationTimeoutMs(),
       engineOverride: 'podman',
     });
   }
@@ -1419,31 +1496,31 @@ export class PodmanService {
         : opts.command.trim().split(/\s+/);
       args.push(...cmdParts);
     }
-    return this.runEngineCommand(args, { timeoutMs: ACTION_TIMEOUT_MS, engineOverride: engine });
+    return this.runEngineCommand(args, { timeoutMs: this.longOperationTimeoutMs(), engineOverride: engine });
   }
 
   public async startContainer(id: string): Promise<CommandResult> {
-    return this.runEngineCommand(['container', 'start', id], { timeoutMs: ACTION_TIMEOUT_MS });
+    return this.runEngineCommand(['container', 'start', id], { timeoutMs: this.longOperationTimeoutMs() });
   }
 
   public async stopContainer(id: string): Promise<CommandResult> {
-    return this.runEngineCommand(['container', 'stop', id], { timeoutMs: ACTION_TIMEOUT_MS });
+    return this.runEngineCommand(['container', 'stop', id], { timeoutMs: this.longOperationTimeoutMs() });
   }
 
   public async restartContainer(id: string): Promise<CommandResult> {
-    return this.runEngineCommand(['container', 'restart', id], { timeoutMs: ACTION_TIMEOUT_MS });
+    return this.runEngineCommand(['container', 'restart', id], { timeoutMs: this.longOperationTimeoutMs() });
   }
 
   public async pauseContainer(id: string): Promise<CommandResult> {
     return this.runEngineCommand(['container', 'pause', id], {
-      timeoutMs: ACTION_TIMEOUT_MS,
+      timeoutMs: this.longOperationTimeoutMs(),
       engineOverride: 'podman',
     });
   }
 
   public async unpauseContainer(id: string): Promise<CommandResult> {
     return this.runEngineCommand(['container', 'unpause', id], {
-      timeoutMs: ACTION_TIMEOUT_MS,
+      timeoutMs: this.longOperationTimeoutMs(),
       engineOverride: 'podman',
     });
   }
@@ -1481,11 +1558,14 @@ export class PodmanService {
     const results: PodmanBatchItemResult[] = [];
     for (const id of uniqueIds) {
       const target = targets.get(id)!;
+      this.reportStep(results.length, uniqueIds.length, target.name);
       const result = await this.runEngineCommand([resource, action, id], {
-        timeoutMs: ACTION_TIMEOUT_MS,
+        timeoutMs: this.longOperationTimeoutMs(),
         engineOverride: 'podman',
       });
       results.push({ id, name: target.name, result });
+      this.reportStep(results.length, uniqueIds.length);
+      if (result.errorCode === 'ETIMEDOUT') break;
     }
     return results;
   }
@@ -1496,7 +1576,7 @@ export class PodmanService {
       args.push('-f');
     }
     args.push(id);
-    return this.runEngineCommand(args, { timeoutMs: ACTION_TIMEOUT_MS });
+    return this.runEngineCommand(args, { timeoutMs: this.longOperationTimeoutMs() });
   }
 
   public async getContainerLogHistory(id: string, tail = 300): Promise<CommandResult> {
@@ -1676,7 +1756,7 @@ export class PodmanService {
   }
 
   public async pullImage(imageName: string): Promise<CommandResult> {
-    return this.runEngineCommand(['pull', imageName.trim()], { timeoutMs: ACTION_TIMEOUT_MS });
+    return this.runEngineCommand(['pull', imageName.trim()], { timeoutMs: this.longOperationTimeoutMs() });
   }
 
   public async buildImage(
@@ -1697,7 +1777,7 @@ export class PodmanService {
     }
     return this.runEngineCommand(
       ['build', '-t', imageTag.trim(), '-f', file, ctx],
-      { timeoutMs: ACTION_TIMEOUT_MS, cwd: ctx }
+      { timeoutMs: this.longOperationTimeoutMs(), cwd: ctx }
     );
   }
 
@@ -1705,13 +1785,15 @@ export class PodmanService {
     const src = sourceImage.trim();
     const dst = targetTag?.trim();
     if (dst && dst !== src) {
-      const tagRes = await this.runEngineCommand(['tag', src, dst]);
+      const tagRes = await this.runEngineCommand(['tag', src, dst], {
+        timeoutMs: this.longOperationTimeoutMs(),
+      });
       if (!tagRes.success) {
         return tagRes;
       }
-      return this.runEngineCommand(['push', dst], { timeoutMs: ACTION_TIMEOUT_MS });
+      return this.runEngineCommand(['push', dst], { timeoutMs: this.longOperationTimeoutMs() });
     }
-    return this.runEngineCommand(['push', src], { timeoutMs: ACTION_TIMEOUT_MS });
+    return this.runEngineCommand(['push', src], { timeoutMs: this.longOperationTimeoutMs() });
   }
 
   public async removeImage(
@@ -1723,15 +1805,15 @@ export class PodmanService {
       args.push('-f');
     }
     args.push(imageId);
-    return this.runEngineCommand(args, { timeoutMs: ACTION_TIMEOUT_MS });
+    return this.runEngineCommand(args, { timeoutMs: this.longOperationTimeoutMs() });
   }
 
   public async pruneDanglingImages(): Promise<CommandResult> {
-    return this.runEngineCommand(['image', 'prune', '-f'], { timeoutMs: ACTION_TIMEOUT_MS });
+    return this.runEngineCommand(['image', 'prune', '-f'], { timeoutMs: this.longOperationTimeoutMs() });
   }
 
   public async pruneAllUnusedImages(): Promise<CommandResult> {
-    return this.runEngineCommand(['image', 'prune', '-a', '-f'], { timeoutMs: ACTION_TIMEOUT_MS });
+    return this.runEngineCommand(['image', 'prune', '-a', '-f'], { timeoutMs: this.longOperationTimeoutMs() });
   }
 
   public async pruneBuilderCache(): Promise<CommandResult> {
@@ -1749,11 +1831,11 @@ export class PodmanService {
         };
       }
       return this.runEngineCommand(['image', 'prune', '--build-cache', '-f'], {
-        timeoutMs: ACTION_TIMEOUT_MS,
+        timeoutMs: this.longOperationTimeoutMs(),
       });
     }
     return this.runEngineCommand(['builder', 'prune', '-a', '-f'], {
-      timeoutMs: ACTION_TIMEOUT_MS,
+      timeoutMs: this.longOperationTimeoutMs(),
     });
   }
 
@@ -1838,7 +1920,7 @@ export class PodmanService {
       }
     }
     args.push(name.trim());
-    return this.runEngineCommand(args, { timeoutMs: ACTION_TIMEOUT_MS });
+    return this.runEngineCommand(args, { timeoutMs: this.longOperationTimeoutMs() });
   }
 
   public async removeVolume(
@@ -1850,11 +1932,11 @@ export class PodmanService {
       args.push('-f');
     }
     args.push(name);
-    return this.runEngineCommand(args, { timeoutMs: ACTION_TIMEOUT_MS });
+    return this.runEngineCommand(args, { timeoutMs: this.longOperationTimeoutMs() });
   }
 
   public async pruneVolumes(): Promise<CommandResult> {
-    return this.runEngineCommand(['volume', 'prune', '--all', '-f'], { timeoutMs: ACTION_TIMEOUT_MS });
+    return this.runEngineCommand(['volume', 'prune', '--all', '-f'], { timeoutMs: this.longOperationTimeoutMs() });
   }
 
   // ==================== NETWORKS ====================
@@ -1998,7 +2080,7 @@ export class PodmanService {
       args.push('--ipv6');
     }
     args.push(opts.name.trim());
-    return this.runEngineCommand(args, { timeoutMs: ACTION_TIMEOUT_MS });
+    return this.runEngineCommand(args, { timeoutMs: this.longOperationTimeoutMs() });
   }
 
   public async removeNetwork(
@@ -2011,7 +2093,7 @@ export class PodmanService {
       args.push('-f');
     }
     args.push(name);
-    return this.runEngineCommand(args, { timeoutMs: ACTION_TIMEOUT_MS });
+    return this.runEngineCommand(args, { timeoutMs: this.longOperationTimeoutMs() });
   }
 
   public async removeResourceSelection(
@@ -2072,12 +2154,14 @@ export class PodmanService {
 
     const results: PodmanBatchItemResult[] = [];
     for (const item of targets.values()) {
-      const fail = (message: string): void => {
+      this.reportStep(results.length, targets.size, item.name);
+      const fail = (message: string, errorCode?: string): void => {
         results.push({
           id: item.name,
           name: item.name,
-          result: { success: false, stdout: '', stderr: message, exitCode: 1 },
+          result: { success: false, stdout: '', stderr: message, exitCode: 1, errorCode },
         });
+        this.reportStep(results.length, targets.size);
       };
       if (contextKey() !== initialContext) {
         fail('The active engine or executable changed; this resource was not removed.');
@@ -2088,7 +2172,8 @@ export class PodmanService {
           engineOverride: expectedEngine,
         });
         if (!inspected.success) {
-          fail(`Could not recheck this resource: ${(inspected.stderr || inspected.stdout || `exit code ${inspected.exitCode}`).trim()}`);
+          fail(`Could not recheck this resource: ${(inspected.stderr || inspected.stdout || `exit code ${inspected.exitCode}`).trim()}`, inspected.errorCode);
+          if (inspected.errorCode === 'ETIMEDOUT') break;
           continue;
         }
         let current: Record<string, unknown>[];
@@ -2116,10 +2201,12 @@ export class PodmanService {
       }
       const target = resource === 'network' && item.identity ? item.identity : item.name;
       const result = await this.runEngineCommand([resource, 'rm', '--', target], {
-        timeoutMs: ACTION_TIMEOUT_MS,
+        timeoutMs: this.longOperationTimeoutMs(),
         engineOverride: expectedEngine,
       });
       results.push({ id: item.name, name: item.name, result });
+      this.reportStep(results.length, targets.size);
+      if (result.errorCode === 'ETIMEDOUT') break;
     }
     return results;
   }
@@ -2270,7 +2357,7 @@ export class PodmanService {
     if (!targets.containers.some((container) => (container.replica || 0) > 1) &&
         new Set(servicesWithContainers).size === servicesWithContainers.length) {
       return this.runComposeCommand(
-        composeFile, [action, ...(services || [])], ACTION_TIMEOUT_MS, projectName
+        composeFile, [action, ...(services || [])], this.longOperationTimeoutMs(), projectName
       );
     }
 
@@ -2283,17 +2370,26 @@ export class PodmanService {
     const stdout: string[] = [];
     const stderr: string[] = [];
     let firstFailure: CommandResult | undefined;
+    let completed = 0;
+    let processed = 0;
     for (const container of targets.containers) {
       targets.ensureUnchanged();
+      this.reportStep(processed, targets.containers.length, container.name);
       const timeout = timeouts.get(container.service);
       const result = await this.runEngineCommand([
         'container', action,
         ...(timeout === undefined ? [] : ['--time', String(timeout)]),
         container.fullId,
-      ], { timeoutMs: ACTION_TIMEOUT_MS, engineOverride: 'podman' });
+      ], { timeoutMs: this.longOperationTimeoutMs(), engineOverride: 'podman' });
       if (result.stdout) stdout.push(result.stdout);
       if (result.stderr) stderr.push(`${container.name}: ${result.stderr.trim()}`);
-      if (!result.success) firstFailure ??= result;
+      if (!result.success) {
+        if (result.errorCode === 'ETIMEDOUT') firstFailure = result;
+        else firstFailure ??= result;
+      }
+      else completed++;
+      this.reportStep(++processed, targets.containers.length);
+      if (result.errorCode === 'ETIMEDOUT') break;
     }
     targets.ensureUnchanged();
     return {
@@ -2303,6 +2399,8 @@ export class PodmanService {
       exitCode: firstFailure?.exitCode ?? 0,
       commandStr: firstFailure?.commandStr,
       errorCode: firstFailure?.errorCode,
+      completed,
+      total: targets.containers.length,
     };
   }
 
@@ -2320,7 +2418,7 @@ export class PodmanService {
     if (opts?.services?.length) {
       args.push(...opts.services);
     }
-    return this.runComposeCommand(composeFile, args, ACTION_TIMEOUT_MS, opts?.projectName);
+    return this.runComposeCommand(composeFile, args, this.longOperationTimeoutMs(), opts?.projectName);
   }
 
   public async composeStart(
@@ -2335,7 +2433,7 @@ export class PodmanService {
     if (services?.length) {
       args.push(...services);
     }
-    return this.runComposeCommand(composeFile, args, ACTION_TIMEOUT_MS, projectName);
+    return this.runComposeCommand(composeFile, args, this.longOperationTimeoutMs(), projectName);
   }
 
   public async composeStop(
@@ -2350,7 +2448,7 @@ export class PodmanService {
     if (services?.length) {
       args.push(...services);
     }
-    return this.runComposeCommand(composeFile, args, ACTION_TIMEOUT_MS, projectName);
+    return this.runComposeCommand(composeFile, args, this.longOperationTimeoutMs(), projectName);
   }
 
   public async composeDown(
@@ -2365,12 +2463,12 @@ export class PodmanService {
       args.push('--remove-orphans');
     }
     if (!this.isPodman()) {
-      return this.runComposeCommand(composeFile, args, ACTION_TIMEOUT_MS, opts?.projectName);
+      return this.runComposeCommand(composeFile, args, this.longOperationTimeoutMs(), opts?.projectName);
     }
     const targets = await this.getPodmanComposeTargets(
       composeFile, undefined, opts?.projectName, opts?.removeOrphans
     );
-    const result = await this.runComposeCommand(composeFile, args, ACTION_TIMEOUT_MS, opts?.projectName);
+    const result = await this.runComposeCommand(composeFile, args, this.longOperationTimeoutMs(), opts?.projectName);
     if (!result.success) {
       return result;
     }
@@ -2395,7 +2493,7 @@ export class PodmanService {
       const stopped = await this.runEngineCommand([
         'container', 'stop', ...(timeout === undefined ? [] : ['--time', String(timeout)]),
         container.fullId,
-      ], { timeoutMs: ACTION_TIMEOUT_MS, engineOverride: 'podman' });
+      ], { timeoutMs: this.longOperationTimeoutMs(), engineOverride: 'podman' });
       if (!stopped.success) {
         return stopped;
       }
@@ -2404,13 +2502,13 @@ export class PodmanService {
     const removed = await this.runEngineCommand(
       ['container', 'rm', ...(opts?.removeVolumes ? ['-v'] : []),
         ...ordered.map((container) => container.fullId)],
-      { timeoutMs: ACTION_TIMEOUT_MS, engineOverride: 'podman' }
+      { timeoutMs: this.longOperationTimeoutMs(), engineOverride: 'podman' }
     );
     if (!removed.success) {
       return removed;
     }
     targets.ensureUnchanged();
-    const finished = await this.runComposeCommand(composeFile, args, ACTION_TIMEOUT_MS, opts?.projectName);
+    const finished = await this.runComposeCommand(composeFile, args, this.longOperationTimeoutMs(), opts?.projectName);
     if (!finished.success) {
       return finished;
     }
@@ -2465,32 +2563,40 @@ export class PodmanService {
         }
       };
       const ordered = await this.orderPodmanContainersForRemoval(targets.containers, ensureUnchanged);
+      let processed = 0;
       for (const container of ordered) {
         ensureUnchanged();
+        this.reportStep(processed, ordered.length, container.name);
         const timeout = timeouts.get(container.service);
         const stopped = await this.runEngineCommand([
           'container', 'stop', ...(timeout === undefined ? [] : ['--time', String(timeout)]),
           container.fullId,
         ], {
-          timeoutMs: ACTION_TIMEOUT_MS,
+          timeoutMs: this.longOperationTimeoutMs(),
           engineOverride: 'podman',
         });
         if (!stopped.success) {
-          firstFailure ??= stopped;
+          if (stopped.errorCode === 'ETIMEDOUT') firstFailure = stopped;
+          else firstFailure ??= stopped;
           failures.push(`${container.name}: ${(stopped.stderr || stopped.stdout || `exit code ${stopped.exitCode}`).trim()}`);
+          this.reportStep(++processed, ordered.length);
+          if (stopped.errorCode === 'ETIMEDOUT') break;
           continue;
         }
         ensureUnchanged();
         const result = await this.runEngineCommand(['container', 'rm', container.fullId], {
-          timeoutMs: ACTION_TIMEOUT_MS,
+          timeoutMs: this.longOperationTimeoutMs(),
           engineOverride: 'podman',
         });
         if (result.success) {
           removed.push(container.name);
         } else {
-          firstFailure ??= result;
+          if (result.errorCode === 'ETIMEDOUT') firstFailure = result;
+          else firstFailure ??= result;
           failures.push(`${container.name}: ${(result.stderr || result.stdout || `exit code ${result.exitCode}`).trim()}`);
         }
+        this.reportStep(++processed, ordered.length);
+        if (result.errorCode === 'ETIMEDOUT') break;
       }
       ensureUnchanged();
       if (firstFailure) {
@@ -2498,6 +2604,8 @@ export class PodmanService {
           ...firstFailure,
           stdout: removed.join('\n'),
           stderr: `${removed.length} of ${targets.containers.length} containers removed.\n${failures.join('\n')}`,
+          completed: removed.length,
+          total: targets.containers.length,
         };
       }
       const remaining = (await this.composePs(composeFile))
@@ -2536,7 +2644,7 @@ export class PodmanService {
       };
     }
     return this.runEngineCommand(['container', 'rm', '-f', ...targets.map((t) => t.fullId)], {
-      timeoutMs: ACTION_TIMEOUT_MS,
+      timeoutMs: this.longOperationTimeoutMs(),
       engineOverride: engine,
     });
   }
@@ -2553,7 +2661,7 @@ export class PodmanService {
     if (services?.length) {
       args.push(...services);
     }
-    return this.runComposeCommand(composeFile, args, ACTION_TIMEOUT_MS, projectName);
+    return this.runComposeCommand(composeFile, args, this.longOperationTimeoutMs(), projectName);
   }
 
   public async composeBuild(
@@ -2569,7 +2677,7 @@ export class PodmanService {
     if (services?.length) {
       args.push(...services);
     }
-    return this.runComposeCommand(composeFile, args, ACTION_TIMEOUT_MS, projectName);
+    return this.runComposeCommand(composeFile, args, this.longOperationTimeoutMs(), projectName);
   }
 
   public async composeBuildUp(
@@ -2632,7 +2740,7 @@ export class PodmanService {
         }
         const removed = await this.runEngineCommand(
           ['container', 'rm', '-f', ...beforeIds],
-          { timeoutMs: ACTION_TIMEOUT_MS, engineOverride: 'podman' }
+          { timeoutMs: this.longOperationTimeoutMs(), engineOverride: 'podman' }
         );
         if (!removed.success) {
           return removed;
@@ -2650,7 +2758,7 @@ export class PodmanService {
     const result = await this.runComposeCommand(
       composeFile,
       ['up', '-d', '--scale', `${service}=${replicas}`, service],
-      ACTION_TIMEOUT_MS,
+      this.longOperationTimeoutMs(),
       projectName
     );
     if (!result.success || engine !== 'podman') {
@@ -2686,7 +2794,7 @@ export class PodmanService {
       .slice(0, current.length - replicas);
     const removed = await this.runEngineCommand(
       ['container', 'rm', '-f', ...excess.map((container) => container.fullId)],
-      { timeoutMs: ACTION_TIMEOUT_MS, engineOverride: 'podman' }
+      { timeoutMs: this.longOperationTimeoutMs(), engineOverride: 'podman' }
     );
     if (!removed.success) {
       return removed;

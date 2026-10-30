@@ -24,6 +24,7 @@ import {
 } from '../components/Shared';
 import { useI18n } from '../i18n';
 import { PodmanPod, useStudioStore } from '../store';
+import { useActionRequest } from '../useActionRequest';
 import { useVsCodeMessaging } from '../vscode';
 
 export const PodGroups: React.FC<{
@@ -56,6 +57,16 @@ export const PodGroups: React.FC<{
   const [addHostsText, setAddHostsText] = useState('');
   const [cpuShares, setCpuShares] = useState('');
   const [labelsText, setLabelsText] = useState('');
+  const createPod = useActionRequest('pod:create', () => {
+    setShowCreateModal(false);
+    setPodName('');
+    setHostname('');
+    setPortsText('');
+    setSelectedNetwork('');
+    setAddHostsText('');
+    setCpuShares('');
+    setLabelsText('');
+  });
 
   const busy = Boolean(operationInProgress);
 
@@ -67,13 +78,14 @@ export const PodGroups: React.FC<{
   const selection = usePodmanSelection(selectable, visibleSelectable, true);
 
   const handleCreatePod = () => {
+    if (busy || createPod.pending) return;
     const splitCsvOrLines = (raw: string) =>
       raw
         .split(/[\r\n,]+/)
         .map((s) => s.trim())
         .filter(Boolean);
 
-    postMessage('pod:create', {
+    createPod.run({
       name: podName.trim() || undefined,
       hostname: hostname.trim() || undefined,
       ports: splitCsvOrLines(portsText),
@@ -82,14 +94,6 @@ export const PodGroups: React.FC<{
       cpuShares: cpuShares.trim() || undefined,
       labels: splitCsvOrLines(labelsText),
     });
-    setShowCreateModal(false);
-    setPodName('');
-    setHostname('');
-    setPortsText('');
-    setSelectedNetwork('');
-    setAddHostsText('');
-    setCpuShares('');
-    setLabelsText('');
   };
 
   return (
@@ -243,13 +247,17 @@ export const PodGroups: React.FC<{
         <Modal
           title={t.pods.createModalTitle}
           subtitle={t.pods.createModalSubtitle}
+          feedback
+          lockFields={createPod.pending}
           onClose={() => setShowCreateModal(false)}
           footer={
             <>
-              <ActionPillButton label={t.common.cancel} onClick={() => setShowCreateModal(false)} />
+              <ActionPillButton label={createPod.pending ? t.common.close : t.common.cancel} onClick={() => setShowCreateModal(false)} />
               <ActionPillButton
                 label={t.pods.createPodBtn}
                 variant="podman"
+                loading={createPod.pending}
+                disabled={busy}
                 onClick={handleCreatePod}
               />
             </>
@@ -359,6 +367,7 @@ export const PodGroups: React.FC<{
             count: logEntries.length,
           })}
           maxWidth="max-w-4xl"
+          feedback
           onClose={() => setLogModalPod(null)}
           footer={
             <>

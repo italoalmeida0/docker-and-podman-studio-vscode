@@ -10,6 +10,7 @@ import {
 import { SelectionBar, useResourceSelection } from '../components/ResourceSelection';
 import { useI18n } from '../i18n';
 import { PodmanVolume, useStudioStore } from '../store';
+import { useActionRequest } from '../useActionRequest';
 import { useVsCodeMessaging } from '../vscode';
 
 const volumeSelectionKey = (volume: PodmanVolume) => `${volume.name}\0${volume.created}`;
@@ -17,7 +18,7 @@ const volumeSelectionKey = (volume: PodmanVolume) => `${volume.name}\0${volume.c
 export const VolumesPage: React.FC = () => {
   const { postMessage } = useVsCodeMessaging();
   const { t, fmt, engine, engineLabel, engineCmd } = useI18n();
-  const { volumes, operationInProgress } = useStudioStore();
+  const { volumes, operationInProgress, operationsInProgress } = useStudioStore();
 
   const [search, setSearch] = useState('');
   const [usageFilter, setUsageFilter] = useState<'all' | 'unused' | 'inUse'>('all');
@@ -25,6 +26,11 @@ export const VolumesPage: React.FC = () => {
   const [volName, setVolName] = useState('');
   const [volDriver, setVolDriver] = useState('local');
   const [volLabels, setVolLabels] = useState('');
+  const createVolume = useActionRequest('volume:create', () => {
+    setVolName('');
+    setVolLabels('');
+    setShowCreate(false);
+  });
 
   const busy = Boolean(operationInProgress);
 
@@ -88,7 +94,8 @@ export const VolumesPage: React.FC = () => {
           />
           <ActionPillButton
             label={t.common.refresh}
-            loading={busy}
+            loading={Boolean(operationsInProgress['list-volumes'] || operationsInProgress['refresh-all'])}
+            disabled={busy}
             icon={<RefreshCw className="w-3.5 h-3.5" />}
             onClick={() => postMessage('volumes:list')}
           />
@@ -225,16 +232,20 @@ export const VolumesPage: React.FC = () => {
           title={fmt(t.volumes.createModalTitle, { engine: engineLabel })}
           subtitle={`${engineCmd} volume create`}
           maxWidth="max-w-lg"
+          feedback
+          lockFields={createVolume.pending}
           onClose={() => setShowCreate(false)}
           footer={
             <>
-              <ActionPillButton label={t.common.cancel} onClick={() => setShowCreate(false)} />
+              <ActionPillButton label={createVolume.pending ? t.common.close : t.common.cancel} onClick={() => setShowCreate(false)} />
               <ActionPillButton
                 label={t.volumes.createVolumeBtn}
                 variant="podman"
-                disabled={!volName.trim()}
+                loading={createVolume.pending}
+                disabled={!volName.trim() || busy}
                 onClick={() => {
-                  postMessage('volume:create', {
+                  if (busy) return;
+                  createVolume.run({
                     name: volName.trim(),
                     driver: volDriver.trim() || 'local',
                     labels: volLabels
@@ -242,9 +253,6 @@ export const VolumesPage: React.FC = () => {
                       .map((l) => l.trim())
                       .filter(Boolean),
                   });
-                  setVolName('');
-                  setVolLabels('');
-                  setShowCreate(false);
                 }}
               />
             </>

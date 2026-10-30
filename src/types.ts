@@ -214,6 +214,8 @@ export interface CommandResult {
   exitCode: number;
   commandStr?: string;
   errorCode?: string;
+  completed?: number;
+  total?: number;
 }
 
 export type PodmanBatchAction = 'start' | 'stop' | 'restart';
@@ -364,6 +366,8 @@ export const InboundCommand = {
   OPEN_EXTERNAL: 'external:open',
   OPEN_VSCODE_SETTINGS: 'vscode:settings:open',
   OUTPUT_SHOW: 'output:show',
+  OUTPUT_COPY: 'output:copy',
+  OPERATIONS_GET: 'operations:get',
 } as const;
 
 export const OutboundCommand = {
@@ -373,6 +377,8 @@ export const OutboundCommand = {
   LOG_HISTORY: 'log:history',
   OPERATION_START: 'operation:start',
   OPERATION_END: 'operation:end',
+  OPERATION_SNAPSHOT: 'operation:snapshot',
+  ACTION_RESULT: 'action:result',
   NOTIFICATION: 'notification',
   ERROR: 'error',
   SYSTEM_INFO_UPDATE: 'system:info:update',

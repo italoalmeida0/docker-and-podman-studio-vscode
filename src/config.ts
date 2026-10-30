@@ -36,6 +36,7 @@ export interface StudioConfig {
   machineName: string;
   pollingInterval: number;
   logBufferSize: number;
+  longOperationTimeoutMinutes: number;
   autoDetectFiles: boolean;
   confirmDeletions: boolean;
   logsOutput: 'studio' | 'outputChannel' | 'terminal';
@@ -75,6 +76,7 @@ export function getConfig(): StudioConfig {
       cfg.get<string>('machineName', 'podman-machine-default') || 'podman-machine-default',
     pollingInterval: cfg.get<number>('pollingInterval', 2500),
     logBufferSize: cfg.get<number>('logBufferSize', 5000),
+    longOperationTimeoutMinutes: cfg.get<number>('longOperationTimeoutMinutes', 60),
     autoDetectFiles: cfg.get<boolean>('autoDetectFiles', true),
     confirmDeletions: cfg.get<boolean>('confirmDeletions', true),
     logsOutput: cfg.get<'studio' | 'outputChannel' | 'terminal'>('logsOutput', 'studio'),

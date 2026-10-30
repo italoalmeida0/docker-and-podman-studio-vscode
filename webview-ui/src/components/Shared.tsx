@@ -3,6 +3,7 @@ import { LoaderCircle } from 'lucide-react';
 import { TranslationDict } from '../i18n/en';
 import { useI18n } from '../i18n';
 import { ServiceStatus } from '../store';
+import { FeedbackCenter } from './FeedbackCenter';
 
 export interface StatusStyle {
   dot: string;
@@ -260,10 +261,15 @@ export const Modal: React.FC<{
   onClose: () => void;
   children: React.ReactNode;
   footer?: React.ReactNode;
-}> = ({ title, subtitle, maxWidth = 'max-w-2xl', onClose, children, footer }) => {
+  feedback?: boolean;
+  lockFields?: boolean;
+}> = ({ title, subtitle, maxWidth = 'max-w-2xl', onClose, children, footer, feedback = false, lockFields = false }) => {
   const { t } = useI18n();
   return (
     <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
       className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-6"
       onClick={onClose}
     >
@@ -284,7 +290,10 @@ export const Modal: React.FC<{
             {t.common.close}
           </button>
         </div>
-        <div className="p-5 overflow-auto flex-1 space-y-4">{children}</div>
+        {feedback && <FeedbackCenter />}
+        <div className="p-5 overflow-auto flex-1">
+          <fieldset disabled={lockFields} className="min-w-0 space-y-4">{children}</fieldset>
+        </div>
         {footer && (
           <div className="px-5 py-3 border-t border-panel-border flex items-center justify-end gap-2 bg-panel-bg shrink-0">
             {footer}

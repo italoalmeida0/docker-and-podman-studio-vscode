@@ -34,6 +34,7 @@
   "cfg.machineName": "Nome padrão da VM Podman Machine (Windows/macOS no modo Podman).",
   "cfg.pollingInterval": "Intervalo de atualização do status dos contêineres em milissegundos.",
   "cfg.logBufferSize": "Número máximo de linhas de log mantidas em memória.",
+  "cfg.longOperationTimeoutMinutes": "Tempo máximo, em minutos, para builds, transferências de imagens, Compose Up, criação de contêineres e inicialização da Podman Machine. Ao atingir o limite, o Studio solicita a interrupção; confira o estado da engine antes de tentar novamente.",
   "cfg.autoDetectFiles": "Detectar automaticamente arquivos docker-compose.yml, compose.yml e podman-compose.yml no workspace e em contêineres ativos.",
   "cfg.confirmDeletions": "Solicitar confirmação antes de ações destrutivas de exclusão ou limpeza.",
   "cfg.logsOutput": "Destino padrão dos logs de contêineres ('studio', 'outputChannel' ou 'terminal').",

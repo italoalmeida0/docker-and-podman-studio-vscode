@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Boxes,
   CheckCircle2,
@@ -13,6 +13,7 @@ import {
 import { ActionPillButton, Modal } from '../components/Shared';
 import { DockerMark, PodmanMark } from '../components/BrandIcons';
 import { LANGUAGE_OPTIONS, useI18n } from '../i18n';
+import { useFeedbackTexts } from '../i18n/feedback';
 import {
   ContainerEngine,
   LanguageSetting,
@@ -20,6 +21,8 @@ import {
   useStudioStore,
 } from '../store';
 import { useVsCodeMessaging } from '../vscode';
+import { useActionRequest } from '../useActionRequest';
+import { reconcileSettingsDraft } from '../settingsDraft';
 
 const DEFAULT_SETTINGS: StudioSettings = {
   engine: 'docker',
@@ -32,6 +35,7 @@ const DEFAULT_SETTINGS: StudioSettings = {
   machineName: 'podman-machine-default',
   pollingInterval: 2500,
   logBufferSize: 5000,
+  longOperationTimeoutMinutes: 60,
   autoDetectFiles: true,
   confirmDeletions: true,
   logsOutput: 'studio',
@@ -58,19 +62,63 @@ export const SettingsPage: React.FC = () => {
     changeEngine,
   } = useI18n();
   const { settings, settingsTestResult, setSettingsTestResult, operationsInProgress } = useStudioStore();
+  const feedback = useFeedbackTexts();
 
   const [form, setForm] = useState<StudioSettings>(settings || DEFAULT_SETTINGS);
+  const formRef = useRef(form);
+  const dirtyFields = useRef(new Set<keyof StudioSettings>());
   const [registrySecret, setRegistrySecret] = useState('');
   const [showDisconnectModal, setShowDisconnectModal] = useState(false);
+  const saveSettings = useActionRequest('settings:save', () => {
+    dirtyFields.current.clear();
+    const saved = useStudioStore.getState().settings;
+    if (saved) {
+      formRef.current = saved;
+      setForm(saved);
+    }
+    setRegistrySecret('');
+  });
+  const resetPaths = useActionRequest('settings:resetPaths', () => {
+    for (const key of ['dockerPath', 'podmanPath', 'composePath'] as const) {
+      dirtyFields.current.delete(key);
+    }
+    const saved = useStudioStore.getState().settings;
+    if (saved) {
+      const merged = reconcileSettingsDraft(saved, formRef.current, dirtyFields.current);
+      dirtyFields.current = merged.dirty;
+      formRef.current = merged.form;
+      setForm(merged.form);
+    }
+  });
+  const disconnectRegistry = useActionRequest('settings:disconnect', () => setShowDisconnectModal(false));
+  const busy = Object.keys(operationsInProgress).length > 0;
+  const timeoutValid = Number.isInteger(form.longOperationTimeoutMinutes) &&
+    form.longOperationTimeoutMinutes >= 5 && form.longOperationTimeoutMinutes <= 720;
 
   useEffect(() => {
     if (settings) {
-      setForm(settings);
+      const merged = reconcileSettingsDraft(settings, formRef.current, dirtyFields.current);
+      dirtyFields.current = merged.dirty;
+      formRef.current = merged.form;
+      setForm(merged.form);
     }
   }, [settings]);
 
+  useEffect(() => {
+    if (!settingsTestResult?.ok) return;
+    const timer = setTimeout(() => {
+      if (useStudioStore.getState().settingsTestResult === settingsTestResult) {
+        setSettingsTestResult(null);
+      }
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, [settingsTestResult, setSettingsTestResult]);
+
   const updateField = <K extends keyof StudioSettings>(key: K, val: StudioSettings[K]) => {
-    setForm((prev) => ({ ...prev, [key]: val }));
+    dirtyFields.current.add(key);
+    const next = { ...formRef.current, [key]: val };
+    formRef.current = next;
+    setForm(next);
   };
 
   const handleEngineChange = (nextEngine: ContainerEngine) => {
@@ -84,17 +132,18 @@ export const SettingsPage: React.FC = () => {
   };
 
   const handleSave = () => {
+    if (!timeoutValid || busy || saveSettings.pending || resetPaths.pending) return;
     setSettingsTestResult(null);
-    postMessage('settings:save', {
+    saveSettings.run({
       ...form,
       engine,
       language: languageSetting,
       ...(registrySecret.trim() ? { registrySecret: registrySecret.trim() } : {}),
     });
-    setRegistrySecret('');
   };
 
   const handleTestRegistry = () => {
+    if (busy) return;
     setSettingsTestResult(null);
     postMessage('settings:test', {
       ...form,
@@ -120,19 +169,26 @@ export const SettingsPage: React.FC = () => {
           <ActionPillButton
             label={t.settings.resetPathsBtn}
             icon={<RotateCcw className="w-3.5 h-3.5" />}
-            onClick={() => postMessage('settings:resetPaths')}
+            loading={resetPaths.pending || Boolean(operationsInProgress['settings-reset'])}
+            disabled={busy || saveSettings.pending}
+            onClick={() => resetPaths.run(undefined)}
           />
           <ActionPillButton
             label={t.settings.saveSettingsBtn}
             variant="brand"
             icon={<Save className="w-3.5 h-3.5" />}
+            loading={saveSettings.pending || Boolean(operationsInProgress['settings-save'])}
+            disabled={!timeoutValid || busy || resetPaths.pending}
             onClick={handleSave}
           />
         </div>
       </div>
 
       {/* Body */}
-      <div className="flex-1 overflow-auto p-6 space-y-5 max-w-5xl">
+      <fieldset
+        disabled={saveSettings.pending || resetPaths.pending || Boolean(operationsInProgress['settings-save'] || operationsInProgress['settings-reset'])}
+        className="flex-1 min-h-0 min-w-0 overflow-auto p-6 space-y-5 max-w-5xl"
+      >
         {/* Section 0: Container Engine Selector (Docker Default vs Podman) */}
         <div className="bg-panel-card border border-panel-border rounded-xl p-5 shadow-card space-y-4">
           <div>
@@ -146,6 +202,7 @@ export const SettingsPage: React.FC = () => {
             {/* Docker Card (Default) */}
             <button
               type="button"
+              disabled={busy}
               onClick={() => handleEngineChange('docker')}
               className={`text-left rounded-xl p-4 border transition-all flex flex-col justify-between gap-2.5 ${
                 engine === 'docker'
@@ -176,6 +233,7 @@ export const SettingsPage: React.FC = () => {
             {/* Podman Card */}
             <button
               type="button"
+              disabled={busy}
               onClick={() => handleEngineChange('podman')}
               className={`text-left rounded-xl p-4 border transition-all flex flex-col justify-between gap-2.5 ${
                 engine === 'podman'
@@ -348,6 +406,27 @@ export const SettingsPage: React.FC = () => {
                 <option value="terminal">{t.settings.logsOutputTerminal}</option>
               </select>
             </div>
+          </div>
+
+          <div className="max-w-md">
+            <label htmlFor="long-operation-timeout" className="block text-xs text-text-secondary mb-1">
+              {feedback.timeoutLabel}
+            </label>
+            <input
+              id="long-operation-timeout"
+              type="number"
+              min={5}
+              max={720}
+              step={1}
+              value={Number.isFinite(form.longOperationTimeoutMinutes) ? form.longOperationTimeoutMinutes : ''}
+              onChange={(e) => updateField('longOperationTimeoutMinutes', e.target.value === '' ? NaN : Number(e.target.value))}
+              aria-invalid={!timeoutValid}
+              aria-describedby="long-operation-timeout-hint"
+              className="input-field font-mono"
+            />
+            <p id="long-operation-timeout-hint" className={`mt-1 text-xs ${timeoutValid ? 'text-text-secondary' : 'text-accent-red'}`}>
+              {timeoutValid ? feedback.timeoutHint : feedback.invalidTimeout}
+            </p>
           </div>
 
           <div className="grid grid-cols-3 gap-4">
@@ -538,12 +617,14 @@ export const SettingsPage: React.FC = () => {
               <ActionPillButton
                 label={t.settings.testConnectionBtn}
                 loading={Boolean(operationsInProgress['registry-test'])}
+                disabled={busy}
                 onClick={handleTestRegistry}
               />
               {form.hasRegistrySecret && (
                 <ActionPillButton
                   label={t.settings.disconnectRegistryBtn}
                   variant="danger"
+                  disabled={busy}
                   onClick={() => setShowDisconnectModal(true)}
                 />
               )}
@@ -567,7 +648,7 @@ export const SettingsPage: React.FC = () => {
             </div>
           )}
         </div>
-      </div>
+      </fieldset>
 
       {/* Disconnect Modal */}
       {showDisconnectModal && (
@@ -575,19 +656,24 @@ export const SettingsPage: React.FC = () => {
           title={t.settings.disconnectModalTitle}
           subtitle={fmt(t.settings.disconnectModalSubtitle, { cmd: engineCmd })}
           maxWidth="max-w-md"
+          feedback
+          lockFields={disconnectRegistry.pending}
           onClose={() => setShowDisconnectModal(false)}
           footer={
             <>
               <ActionPillButton
-                label={t.common.cancel}
+                label={disconnectRegistry.pending ? t.common.close : t.common.cancel}
                 onClick={() => setShowDisconnectModal(false)}
               />
               <ActionPillButton
                 label={t.settings.disconnectBtn}
                 variant="danger"
+                loading={disconnectRegistry.pending}
+                disabled={busy}
                 onClick={() => {
-                  postMessage('settings:disconnect', { ...form, engine });
-                  setShowDisconnectModal(false);
+                  if (busy) return;
+                  setSettingsTestResult(null);
+                  disconnectRegistry.run({ ...form, engine });
                 }}
               />
             </>

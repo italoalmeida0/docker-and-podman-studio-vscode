@@ -2,7 +2,7 @@
   "name": "docker-and-podman-studio",
   "displayName": "%ext.displayName%",
   "description": "%ext.description%",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "publisher": "ItaloAlmeida",
   "author": {
     "name": "Italo Almeida",
@@ -349,6 +349,14 @@
           "minimum": 100,
           "order": 10,
           "description": "%cfg.logBufferSize%"
+        },
+        "dockerPodmanStudio.longOperationTimeoutMinutes": {
+          "type": "integer",
+          "default": 60,
+          "minimum": 5,
+          "maximum": 720,
+          "order": 10.1,
+          "description": "%cfg.longOperationTimeoutMinutes%"
         },
         "dockerPodmanStudio.autoDetectFiles": {
           "type": "boolean",

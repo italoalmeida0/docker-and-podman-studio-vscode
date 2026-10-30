@@ -11,6 +11,8 @@ import { bt } from '../i18n';
 import { ComposeFileDetector } from '../services/composeDetector';
 import { PodmanService } from '../services/podmanService';
 import { StatusProvider } from '../services/statusProvider';
+import { OperationEvent } from '../shared/operationFeedback';
+import { CommandResult } from '../types';
 import { showErrorWithCopy } from '../ui/messageUtil';
 import { withStatus } from '../ui/statusBarManager';
 
@@ -21,8 +23,64 @@ export class NativeCommandsManager implements vscode.Disposable {
     private readonly podman: PodmanService,
     private readonly fileDetector: ComposeFileDetector,
     private readonly statusProvider: StatusProvider,
-    private readonly onStateMutated: (selectedComposeFile?: string) => Promise<void>
+    private readonly onStateMutated: (selectedComposeFile?: string) => Promise<void>,
+    private readonly withStudioProgress: <T>(
+      key: string, label: string, task: (report: (event: OperationEvent) => void) => Promise<T>
+    ) => Promise<T>,
+    private readonly output: vscode.OutputChannel
   ) {}
+
+  private showCommandFailure(label: string, result: CommandResult): void {
+    const details = [result.stderr?.trim(), result.stdout?.trim()].filter(Boolean).join('\n') ||
+      bt('engineFailedDefault', { engine: getEngineLabel() });
+    showErrorWithCopy(details, result.commandStr, this.output, label, result.errorCode, result);
+  }
+
+  private async runCommand(
+    label: string,
+    task: () => Promise<CommandResult>
+  ): Promise<CommandResult | undefined> {
+    try {
+      return await this.withStudioProgress('native-command', label, async (report) =>
+        await vscode.window.withProgress({
+          location: vscode.ProgressLocation.Notification,
+          title: label,
+          cancellable: false,
+        }, (progress) => {
+          progress.report({ message: bt('nativeProgressHint') });
+          return withStatus(label, () => this.podman.withCommandProgress(report, task));
+        })
+      );
+    } catch (error) {
+      this.showCommandFailure(label, {
+        success: false,
+        stdout: '',
+        stderr: error instanceof Error ? error.message : String(error),
+        exitCode: -1,
+      });
+      return undefined;
+    }
+  }
+
+  private async runLookup<T>(label: string, task: () => Promise<T>): Promise<T | undefined> {
+    try {
+      return await this.withStudioProgress('native-lookup', label, async () =>
+        await vscode.window.withProgress({
+          location: vscode.ProgressLocation.Notification,
+          title: label,
+          cancellable: false,
+        }, task)
+      );
+    } catch (error) {
+      this.showCommandFailure(label, {
+        success: false,
+        stdout: '',
+        stderr: error instanceof Error ? error.message : String(error),
+        exitCode: -1,
+      });
+      return undefined;
+    }
+  }
 
   public register(context: vscode.ExtensionContext): void {
     this.disposables.push(
@@ -71,13 +129,13 @@ export class NativeCommandsManager implements vscode.Disposable {
       ),
       vscode.commands.registerCommand('dockerPodmanStudio.pushImage', () => this.pushImageWizard()),
       vscode.commands.registerCommand('dockerPodmanStudio.pruneImages', () =>
-        this.runPrune('pruneImages', 'Prune dangling images')
+        this.runPrune('pruneImages', bt('actionPruneImages'))
       ),
       vscode.commands.registerCommand('dockerPodmanStudio.pruneAllImages', () =>
-        this.runPrune('pruneAll', 'Prune all unused images')
+        this.runPrune('pruneAll', bt('actionPruneAllImages'))
       ),
       vscode.commands.registerCommand('dockerPodmanStudio.pruneBuilderCache', () =>
-        this.runPrune('pruneBuilder', `Clear ${getEngineLabel()} builder cache`)
+        this.runPrune('pruneBuilder', bt('actionPruneBuilder', { engine: getEngineLabel() }))
       ),
       vscode.commands.registerCommand('dockerPodmanStudio.openToolsMenu', () =>
         this.openToolsMenu()
@@ -143,7 +201,8 @@ export class NativeCommandsManager implements vscode.Disposable {
       await this.fileDetector.registerFile(uri.fsPath);
       return uri.fsPath;
     }
-    const files = await this.fileDetector.scan();
+    const files = await this.runLookup(bt('findingComposeFiles'), () => this.fileDetector.scan());
+    if (!files) return undefined;
     if (files.length === 0) {
       const selectLabel = bt('selectComposeLabel');
       const cancelLabel = bt('cancel');
@@ -225,38 +284,38 @@ export class NativeCommandsManager implements vscode.Disposable {
     }
 
     const engineLabel = getEngineLabel();
-    await withStatus(`${engineLabel} Compose ${action} (${path.basename(file)})`, async () => {
-      const res =
-        action === 'up'
-          ? await this.podman.composeUp(file)
-          : action === 'start'
-            ? await this.podman.composeStart(file)
-            : action === 'stop'
-              ? await this.podman.composeStop(file)
-              : action === 'down'
-                ? await this.podman.composeDown(file)
-                : action === 'restart'
-                  ? await this.podman.composeRestart(file)
-                  : await this.podman.composeBuildUp(file);
-
-      if (!res.success) {
-        await showErrorWithCopy(
-          `Failed to execute ${engineLabel} Compose ${action}: ${res.stderr}`,
-          res.commandStr
-        );
-      } else {
-        if (action === 'down' && getConfig().engine === 'docker') {
-          this.statusProvider.stopPolling();
-        } else {
-          this.statusProvider.startPolling(file, getConfig().pollingInterval);
-        }
-        vscode.window.showInformationMessage(
-          bt('opCompleted', { op: `${engineLabel} Compose (${action})` })
-        );
-        await this.onStateMutated(file);
-      }
-      return res;
-    });
+    const operation = `${bt(
+      action === 'up' || action === 'start' ? 'actionComposeUp'
+        : action === 'stop' ? 'actionComposeStop'
+          : action === 'down' ? 'actionComposeDown'
+            : action === 'restart' ? 'actionComposeRestart' : 'actionComposeBuildUp',
+      { engine: engineLabel }
+    )} (${path.basename(file)})`;
+    const res = await this.runCommand(operation, () =>
+      action === 'up'
+        ? this.podman.composeUp(file)
+        : action === 'start'
+          ? this.podman.composeStart(file)
+          : action === 'stop'
+            ? this.podman.composeStop(file)
+            : action === 'down'
+              ? this.podman.composeDown(file)
+              : action === 'restart'
+                ? this.podman.composeRestart(file)
+                : this.podman.composeBuildUp(file)
+    );
+    if (!res) return;
+    if (!res.success) {
+      this.showCommandFailure(operation, res);
+      return;
+    }
+    if (action === 'down' && getConfig().engine === 'docker') {
+      this.statusProvider.stopPolling();
+    } else {
+      this.statusProvider.startPolling(file, getConfig().pollingInterval);
+    }
+    void vscode.window.showInformationMessage(bt('opCompleted', { op: operation }));
+    await this.onStateMutated(file);
   }
 
   private async startMachine(): Promise<void> {
@@ -264,21 +323,17 @@ export class NativeCommandsManager implements vscode.Disposable {
       return;
     }
     const machine = getConfig().machineName;
-    await withStatus(`Start Machine ${machine}`, async () => {
+    const operation = bt('actionMachineStart', { name: machine });
+    const res = await this.runCommand(operation, async () => {
       const res = await this.podman.startMachine(machine);
-      if (!res.success && !res.stderr.toLowerCase().includes('already running')) {
-        await showErrorWithCopy(
-          `Failed to start Podman Machine '${machine}': ${res.stderr}`,
-          res.commandStr
-        );
-      } else {
-        vscode.window.showInformationMessage(`Podman Machine '${machine}' is running.`);
-      }
-      await this.onStateMutated();
       return !res.success && res.stderr.toLowerCase().includes('already running')
         ? { ...res, success: true }
         : res;
     });
+    if (!res) return;
+    if (!res.success) this.showCommandFailure(operation, res);
+    else void vscode.window.showInformationMessage(bt('opCompleted', { op: operation }));
+    await this.onStateMutated();
   }
 
   private async stopMachine(): Promise<void> {
@@ -286,19 +341,12 @@ export class NativeCommandsManager implements vscode.Disposable {
       return;
     }
     const machine = getConfig().machineName;
-    await withStatus(`Stop Machine ${machine}`, async () => {
-      const res = await this.podman.stopMachine(machine);
-      if (!res.success) {
-        await showErrorWithCopy(
-          `Failed to stop Podman Machine '${machine}': ${res.stderr}`,
-          res.commandStr
-        );
-      } else {
-        vscode.window.showInformationMessage(`Podman Machine '${machine}' stopped.`);
-      }
-      await this.onStateMutated();
-      return res;
-    });
+    const operation = bt('actionMachineStop', { name: machine });
+    const res = await this.runCommand(operation, () => this.podman.stopMachine(machine));
+    if (!res) return;
+    if (!res.success) this.showCommandFailure(operation, res);
+    else void vscode.window.showInformationMessage(bt('opCompleted', { op: operation }));
+    await this.onStateMutated();
   }
 
   private async restartMachine(): Promise<void> {
@@ -306,19 +354,12 @@ export class NativeCommandsManager implements vscode.Disposable {
       return;
     }
     const machine = getConfig().machineName;
-    await withStatus(`Restart Machine ${machine}`, async () => {
-      const res = await this.podman.restartMachine(machine);
-      if (!res.success) {
-        await showErrorWithCopy(
-          `Failed to restart Podman Machine '${machine}': ${res.stderr}`,
-          res.commandStr
-        );
-      } else {
-        vscode.window.showInformationMessage(`Podman Machine '${machine}' restarted.`);
-      }
-      await this.onStateMutated();
-      return res;
-    });
+    const operation = bt('actionMachineRestart', { name: machine });
+    const res = await this.runCommand(operation, () => this.podman.restartMachine(machine));
+    if (!res) return;
+    if (!res.success) this.showCommandFailure(operation, res);
+    else void vscode.window.showInformationMessage(bt('opCompleted', { op: operation }));
+    await this.onStateMutated();
   }
 
   private async createPodWizard(): Promise<void> {
@@ -349,24 +390,22 @@ export class NativeCommandsManager implements vscode.Disposable {
       placeHolder: '1024',
     });
 
-    await withStatus('Create Pod', async () => {
-      const res = await this.podman.createPod({
+    const operation = bt('actionPodCreate', { name: name || '' });
+    const res = await this.runCommand(operation, () =>
+      this.podman.createPod({
         name,
         hostname,
         ports: portsInput ? portsInput.split(',').map((s) => s.trim()) : undefined,
         additionalHosts: addHosts ? addHosts.split(';').map((s) => s.trim()) : undefined,
         cpuShares,
-      });
-      if (!res.success) {
-        await showErrorWithCopy(`Failed to create Pod: ${res.stderr}`, res.commandStr);
-      } else {
-        vscode.window.showInformationMessage(
-          `Pod created: ${res.stdout.trim().substring(0, 12)}`
-        );
-        await this.onStateMutated();
       }
-      return res;
-    });
+    ));
+    if (!res) return;
+    if (!res.success) this.showCommandFailure(operation, res);
+    else {
+      void vscode.window.showInformationMessage(bt('opCompleted', { op: operation }));
+      await this.onStateMutated();
+    }
   }
 
   private async createContainerWizard(): Promise<void> {
@@ -395,7 +434,8 @@ export class NativeCommandsManager implements vscode.Disposable {
       return;
     }
 
-    const images = await this.podman.listImages();
+    const images = await this.runLookup(bt('loadingImages'), () => this.podman.listImages());
+    if (!images) return;
     const imageChoices = [
       { label: '$(cloud-download) Enter image reference manually...', imageRef: '__custom__' },
       ...images
@@ -534,8 +574,9 @@ export class NativeCommandsManager implements vscode.Disposable {
       }
     }
 
-    await withStatus('Create Container', async () => {
-      const res = await this.podman.createContainer({
+    const operation = bt('actionContainerCreate', { name: name || image });
+    const res = await this.runCommand(operation, () =>
+      this.podman.createContainer({
         image,
         name,
         pod: selectedPod,
@@ -546,17 +587,14 @@ export class NativeCommandsManager implements vscode.Disposable {
         cpus,
         memory,
         mounts,
-      });
-      if (!res.success) {
-        await showErrorWithCopy(`Failed to create container: ${res.stderr}`, res.commandStr);
-      } else {
-        vscode.window.showInformationMessage(
-          `Container created: ${res.stdout.trim().substring(0, 12)}`
-        );
-        await this.onStateMutated();
       }
-      return res;
-    });
+    ));
+    if (!res) return;
+    if (!res.success) this.showCommandFailure(operation, res);
+    else {
+      void vscode.window.showInformationMessage(bt('opCompleted', { op: operation }));
+      await this.onStateMutated();
+    }
   }
 
   private async createVolumeWizard(): Promise<void> {
@@ -567,16 +605,14 @@ export class NativeCommandsManager implements vscode.Disposable {
     if (!name?.trim()) {
       return;
     }
-    await withStatus(`Create volume ${name}`, async () => {
-      const res = await this.podman.createVolume(name.trim());
-      if (!res.success) {
-        await showErrorWithCopy(`Failed to create volume: ${res.stderr}`, res.commandStr);
-      } else {
-        vscode.window.showInformationMessage(`Volume '${name}' created.`);
-        await this.onStateMutated();
-      }
-      return res;
-    });
+    const operation = bt('actionVolumeCreate', { name: name.trim() });
+    const res = await this.runCommand(operation, () => this.podman.createVolume(name.trim()));
+    if (!res) return;
+    if (!res.success) this.showCommandFailure(operation, res);
+    else {
+      void vscode.window.showInformationMessage(bt('opCompleted', { op: operation }));
+      await this.onStateMutated();
+    }
   }
 
   private async createNetworkWizard(): Promise<void> {
@@ -587,16 +623,14 @@ export class NativeCommandsManager implements vscode.Disposable {
     if (!name?.trim()) {
       return;
     }
-    await withStatus(`Create network ${name}`, async () => {
-      const res = await this.podman.createNetwork({ name: name.trim() });
-      if (!res.success) {
-        await showErrorWithCopy(`Failed to create network: ${res.stderr}`, res.commandStr);
-      } else {
-        vscode.window.showInformationMessage(`Network '${name}' created.`);
-        await this.onStateMutated();
-      }
-      return res;
-    });
+    const operation = bt('actionNetworkCreate', { name: name.trim() });
+    const res = await this.runCommand(operation, () => this.podman.createNetwork({ name: name.trim() }));
+    if (!res) return;
+    if (!res.success) this.showCommandFailure(operation, res);
+    else {
+      void vscode.window.showInformationMessage(bt('opCompleted', { op: operation }));
+      await this.onStateMutated();
+    }
   }
 
   private async buildImageWizard(uri?: vscode.Uri): Promise<void> {
@@ -631,16 +665,14 @@ export class NativeCommandsManager implements vscode.Disposable {
       return;
     }
 
-    await withStatus(`Build image ${tag}`, async () => {
-      const res = await this.podman.buildImage(dockerfilePath!, tag.trim());
-      if (!res.success) {
-        await showErrorWithCopy(`Image build failed: ${res.stderr}`, res.commandStr);
-      } else {
-        vscode.window.showInformationMessage(`Image '${tag}' built successfully!`);
-        await this.onStateMutated();
-      }
-      return res;
-    });
+    const operation = bt('actionImageBuild', { name: tag.trim() });
+    const res = await this.runCommand(operation, () => this.podman.buildImage(dockerfilePath!, tag.trim()));
+    if (!res) return;
+    if (!res.success) this.showCommandFailure(operation, res);
+    else {
+      void vscode.window.showInformationMessage(bt('opCompleted', { op: operation }));
+      await this.onStateMutated();
+    }
   }
 
   private async pushImageWizard(): Promise<void> {
@@ -675,15 +707,11 @@ export class NativeCommandsManager implements vscode.Disposable {
       return;
     }
 
-    await withStatus(`Push image ${target}`, async () => {
-      const res = await this.podman.pushImage(picked.sourceRef, target.trim());
-      if (!res.success) {
-        await showErrorWithCopy(`Failed to push image: ${res.stderr}`, res.commandStr);
-      } else {
-        vscode.window.showInformationMessage(`Image pushed to '${target}'!`);
-      }
-      return res;
-    });
+    const operation = bt('actionImagePush', { name: target.trim() });
+    const res = await this.runCommand(operation, () => this.podman.pushImage(picked.sourceRef, target.trim()));
+    if (!res) return;
+    if (!res.success) this.showCommandFailure(operation, res);
+    else void vscode.window.showInformationMessage(bt('opCompleted', { op: operation }));
   }
 
   private async runPrune(
@@ -706,22 +734,19 @@ export class NativeCommandsManager implements vscode.Disposable {
         return;
       }
     }
-    await withStatus(label, async () => {
-      const res =
-        kind === 'pruneImages'
-          ? await this.podman.pruneDanglingImages()
-          : kind === 'pruneAll'
-            ? await this.podman.pruneAllUnusedImages()
-            : await this.podman.pruneBuilderCache();
-
-      if (!res.success) {
-        await showErrorWithCopy(`Cleanup failed: ${res.stderr}`, res.commandStr);
-      } else {
-        vscode.window.showInformationMessage(bt('opCompleted', { op: label }));
-        await this.onStateMutated();
-      }
-      return res;
-    });
+    const res = await this.runCommand(label, () =>
+      kind === 'pruneImages'
+        ? this.podman.pruneDanglingImages()
+        : kind === 'pruneAll'
+          ? this.podman.pruneAllUnusedImages()
+          : this.podman.pruneBuilderCache()
+    );
+    if (!res) return;
+    if (!res.success) this.showCommandFailure(label, res);
+    else {
+      void vscode.window.showInformationMessage(bt('opCompleted', { op: label }));
+      await this.onStateMutated();
+    }
   }
 
   private async openToolsMenu(): Promise<void> {

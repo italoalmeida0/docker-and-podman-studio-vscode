@@ -50,6 +50,7 @@ export const DashboardPage: React.FC = () => {
     networks,
     composeFiles,
     operationInProgress,
+    operationsInProgress,
     setActivePage,
   } = useStudioStore();
 
@@ -97,7 +98,8 @@ export const DashboardPage: React.FC = () => {
           />
           <ActionPillButton
             label={t.common.refreshAll}
-            loading={busy}
+            loading={Boolean(operationsInProgress['refresh-all'])}
+            disabled={busy}
             loadingLabel={t.common.syncing}
             icon={<RefreshCw className="w-3.5 h-3.5 stroke-[1.7]" />}
             onClick={() => postMessage('dashboard:get')}

@@ -4,6 +4,22 @@ All notable changes to **Docker and Podman Studio** will be documented in this f
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-10-30
+
+### Added
+- Live command output, elapsed time, and actual batch counts for supported Studio operations, with VS Code progress for Command Palette actions.
+- Configurable timeout for long-running engine actions, from 5 to 720 minutes.
+- Concise explanations for common failures and expandable technical details, including partial batch results.
+
+### Changed
+- Success messages dismiss automatically; errors remain until closed. Forms retain their input after failed actions, and settings refreshes preserve unsaved fields.
+- Builds and image transfers explain that they can take longer without inventing a completion estimate. The Studio output channel keeps the available operation log.
+- On timeout, Studio requests that the local command stop, warns that engine-side work may continue, and leaves remaining batch items unattempted.
+
+### Fixed
+- Prevented concurrent operation output and completion indicators from being attributed to the wrong action.
+- Grouped settings refreshes and retained settings polling updates, while surfacing a failed registry login after a partial settings save.
+
 ## [1.3.0] - 2026-10-30
 
 ### Added

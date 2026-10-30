@@ -88,6 +88,8 @@ export const ComposeOptionsModal: React.FC<{
       title={extra.projectOptions}
       subtitle={extra.projectOptionsSubtitle}
       maxWidth="max-w-3xl"
+      feedback
+      lockFields={saving}
       onClose={() => { if (!saving) onClose(); }}
       footer={(
         <>

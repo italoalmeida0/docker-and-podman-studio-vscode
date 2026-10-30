@@ -98,10 +98,14 @@ Studio monitors selected Compose files, the selected and default environment fil
 - **Podman Batch Controls**: Select visible containers or pods to start, stop, or restart eligible resources together. Failures are reported per resource. Individual containers and pods can also be paused and resumed; Podman infra containers are protected from individual lifecycle and delete actions.
 - **Resource Selection and Cleanup**: Select images or unused volumes and networks for removal. Cleanup identifies candidates explicitly, including named unused volumes, and asks for confirmation with their names; deleting volumes permanently removes their data. Stopped containers count as references. Default networks and Docker non-local networks are protected, and resources are checked again before removal without force.
 - **OCI Images, Builds & Prune Suite**: Pull images, build from `Dockerfile` or `Containerfile`, push to remote registries, and reclaim disk space (`Prune Dangling`, `Prune All Unused`, `Clear Builder Cache`).
-- **Progress & Errors**: Long-running Studio operations show progress. Failures remain visible until dismissed and details are available in the **Docker and Podman Studio** output channel.
+- **Progress & Errors**: Long-running actions show elapsed time, actual batch counts, and expandable live command output when the engine reports it. Success messages disappear automatically; failures stay visible with a short explanation and expandable technical details. Command Palette actions also show VS Code progress and can open the **Docker and Podman Studio** output channel.
 - **Encrypted Registry Authentication**: Store private registry credentials securely in **VS Code `SecretStorage`** (never written in plaintext to `settings.json`) with optional automatic `docker login` / `podman login`.
 
 In Podman mode, image, volume, and network removal does not force-remove resources in use. Podman build-cache cleanup uses `podman image prune --build-cache` when supported; it also removes dangling images. Do not run it during a build.
+
+Builds, image transfers, and other engine-changing commands use a configurable long-operation timeout (60 minutes by default). Short status and registry queries retain separate, shorter timeouts. If a command exceeds its limit, Studio requests that the local command stop, but work may still continue in the engine; refresh and check the actual state before retrying. Remaining batch items are not attempted after a timeout.
+
+The progress view shows a bounded recent output tail; the Studio output channel retains the available full output for the current VS Code session. Build and Compose output can include secrets printed by build scripts or providers, so review logs before sharing them. Registry login and status queries are not streamed as action progress. No estimated finish time is displayed when the engine does not provide one.
 
 ---
 
@@ -193,6 +197,7 @@ Only the CLI for your selected engine is required:
 | `dockerPodmanStudio.machineName` | `"podman-machine-default"` | Default Podman Machine VM name (Windows/macOS in Podman mode). |
 | `dockerPodmanStudio.pollingInterval` | `2500` | Container status polling interval in milliseconds. |
 | `dockerPodmanStudio.logBufferSize` | `5000` | Maximum number of log lines retained in memory. |
+| `dockerPodmanStudio.longOperationTimeoutMinutes` | `60` | Timeout for long-running engine actions, in whole minutes from 5 to 720. A timeout does not guarantee that engine-side work has stopped. |
 | `dockerPodmanStudio.autoDetectFiles` | `true` | Auto-discover `docker-compose.yml`, `compose.yml`, and `podman-compose.yml` files in workspace and active containers. |
 | `dockerPodmanStudio.confirmDeletions` | `true` | Prompt for confirmation before destructive delete or prune operations. |
 | `dockerPodmanStudio.logsOutput` | `"studio"` | Default log viewer target (`"studio"`, `"outputChannel"`, or `"terminal"`). |

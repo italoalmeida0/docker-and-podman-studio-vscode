@@ -220,6 +220,8 @@ export const CreateComposeModal: React.FC<{
         title={fmt(t.wizard.title, { engine: engineLabel })}
         subtitle={t.wizard.subtitle}
         maxWidth="max-w-5xl"
+        feedback
+        lockFields={creating}
         onClose={() => { if (!creating) onClose(); }}
         footer={
           <>

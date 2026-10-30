@@ -347,7 +347,12 @@ test('real Podman builds only the selected Compose services', {
     for (const name of Object.values(images)) assert.equal(await imageExists(name), false);
     cleanupAllowed = true;
     const destinations = await imageVolumeDestinations(service, image);
-    fs.writeFileSync(containerfile, `FROM ${image}\nLABEL studio.integration=${project}\n`);
+    fs.writeFileSync(containerfile, [
+      `FROM ${image}`,
+      `LABEL studio.integration=${project}`,
+      'RUN echo studio-progress-start; sleep 6; echo studio-progress-end',
+      '',
+    ].join('\n'));
     fs.writeFileSync(file, [
       `name: ${project}`,
       'services:',
@@ -365,7 +370,16 @@ test('real Podman builds only the selected Compose services', {
       '',
     ].join('\n'));
 
-    succeeded(await service.composeBuild(file, ['app', 'worker']));
+    let outputStartedAt;
+    const build = await service.withCommandProgress((event) => {
+      if (event.type === 'output' && event.text.includes('studio-progress-start')) {
+        outputStartedAt ??= Date.now();
+      }
+    }, () => service.composeBuild(file, ['app', 'worker']));
+    const buildFinishedAt = Date.now();
+    succeeded(build);
+    assert.ok(outputStartedAt, 'Compose build should emit live progress');
+    assert.ok(buildFinishedAt - outputStartedAt >= 2000, 'progress must arrive before the build finishes');
     const beforeUp = await service.composePs(file, {
       name: project, services: { app: {}, worker: {}, keep: {} },
     });

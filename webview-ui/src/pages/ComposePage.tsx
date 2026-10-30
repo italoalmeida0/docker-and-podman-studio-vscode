@@ -41,8 +41,10 @@ import { ComposeBuilderSpec, validateComposeBuilder } from '../../../src/shared/
 import { applyVisualServiceDraft, createVisualServiceDraft } from '../../../src/shared/composeVisualEdit';
 import { useI18n } from '../i18n';
 import { useComposeExtras } from '../i18n/composeExtras';
+import { useFeedbackTexts } from '../i18n/feedback';
 import { LogEntry, useStudioStore } from '../store';
 import { useVsCodeMessaging } from '../vscode';
+import { useActionRequest } from '../useActionRequest';
 
 type ComposeTab =
   | 'overview'
@@ -74,6 +76,7 @@ function toStringList(value: any): string[] {
 export const ComposePage: React.FC = () => {
   const { t, fmt, engine, engineLabel } = useI18n();
   const extra = useComposeExtras();
+  const feedback = useFeedbackTexts();
   const { postMessage, onMessage } = useVsCodeMessaging();
   const {
     document,
@@ -91,6 +94,7 @@ export const ComposePage: React.FC = () => {
     composeFiles,
     composeContainers,
     operationInProgress,
+    operationsInProgress,
     logEntries,
     logFilter,
     setLogFilter,
@@ -105,6 +109,7 @@ export const ComposePage: React.FC = () => {
   const [removeServiceTarget, setRemoveServiceTarget] = useState<string | null>(null);
   const [scaleTarget, setScaleTarget] = useState<string | null>(null);
   const [scaleReplicas, setScaleReplicas] = useState('');
+  const scaleService = useActionRequest('stack:scale', () => setScaleTarget(null));
   const [showSensitive, setShowSensitive] = useState(false);
   const [serviceEditError, setServiceEditError] = useState('');
 
@@ -452,7 +457,8 @@ export const ComposePage: React.FC = () => {
             )}
             <ActionPillButton
               label={t.common.refresh}
-              loading={busy}
+              loading={Boolean(operationsInProgress['compose-status'] || operationsInProgress['refresh-all'])}
+              disabled={busy}
               icon={<RefreshCw className="w-3.5 h-3.5" />}
               onClick={() => {
                 postMessage('compose:get');
@@ -491,7 +497,7 @@ export const ComposePage: React.FC = () => {
               <ActionPillButton
                 label={t.common.upStart}
                 variant="primary"
-                loading={operationInProgress === 'start'}
+                loading={Boolean(operationsInProgress.start)}
                 loadingLabel={t.common.startingOp}
                 disabled={busy || projectActionsBlocked}
                 icon={<Play className="w-3.5 h-3.5" />}
@@ -499,7 +505,7 @@ export const ComposePage: React.FC = () => {
               />
               <ActionPillButton
                 label={t.common.stop}
-                loading={operationInProgress === 'stop'}
+                loading={Boolean(operationsInProgress.stop)}
                 loadingLabel={t.common.stoppingOp}
                 disabled={busy || !projectReady}
                 icon={<Square className="w-3.5 h-3.5" />}
@@ -507,7 +513,7 @@ export const ComposePage: React.FC = () => {
               />
               <ActionPillButton
                 label={t.common.restart}
-                loading={operationInProgress === 'restart'}
+                loading={Boolean(operationsInProgress.restart)}
                 loadingLabel={t.common.restartingOp}
                 disabled={busy || projectActionsBlocked}
                 icon={<RotateCcw className="w-3.5 h-3.5" />}
@@ -515,7 +521,7 @@ export const ComposePage: React.FC = () => {
               />
               <ActionPillButton
                 label={t.common.build}
-                loading={operationInProgress === 'build'}
+                loading={Boolean(operationsInProgress.build)}
                 loadingLabel={t.common.buildingOp}
                 disabled={busy || projectActionsBlocked}
                 title={extra.buildOnlyHint}
@@ -524,7 +530,7 @@ export const ComposePage: React.FC = () => {
               />
               <ActionPillButton
                 label={extra.rebuild}
-                loading={operationInProgress === 'rebuild'}
+                loading={Boolean(operationsInProgress.rebuild)}
                 disabled={busy || projectActionsBlocked}
                 title={extra.rebuildHint}
                 icon={<Hammer className="w-3.5 h-3.5" />}
@@ -532,7 +538,7 @@ export const ComposePage: React.FC = () => {
               />
               <ActionPillButton
                 label={extra.buildUp}
-                loading={operationInProgress === 'build-up'}
+                loading={Boolean(operationsInProgress['build-up'])}
                 disabled={busy || projectActionsBlocked}
                 title={extra.buildUpHint}
                 icon={<Play className="w-3.5 h-3.5" />}
@@ -541,7 +547,7 @@ export const ComposePage: React.FC = () => {
               <ActionPillButton
                 label={t.common.down}
                 variant="danger"
-                loading={operationInProgress === 'down'}
+                loading={Boolean(operationsInProgress.down)}
                 loadingLabel={t.common.removingOp}
                 disabled={busy || !projectReady}
                 icon={<Trash2 className="w-3.5 h-3.5" />}
@@ -558,8 +564,14 @@ export const ComposePage: React.FC = () => {
           <div role={composeProject.error ? 'alert' : 'status'}
             className="mb-4 bg-panel-card border border-panel-border rounded-md px-4 py-2.5 text-xs text-text-secondary space-y-1">
             {composeProject.resolving ? extra.projectResolving : composeProject.error
-              ? `${extra.projectFailed} ${composeProject.error}`
+              ? extra.projectFailed
               : extra.projectResolved}
+            {composeProject.error && (
+              <details className="text-text-primary">
+                <summary className="cursor-pointer underline underline-offset-2">{feedback.showDetails}</summary>
+                <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono">{composeProject.error}</pre>
+              </details>
+            )}
             {composeProject.customized && !composeProject.error && !composeProject.resolving && (
               <p>{extra.projectEditingHint}</p>
             )}
@@ -598,11 +610,17 @@ export const ComposePage: React.FC = () => {
             }
           />
         ) : composeParseError && tab !== 'yaml' ? (
-          <EmptyState
-            title={extra.invalidYaml}
-            description={composeParseError}
-            action={<ActionPillButton label={extra.openYaml} onClick={() => setTab('yaml')} />}
-          />
+          <div className="space-y-2">
+            <EmptyState
+              title={t.compose.title}
+              description={extra.invalidYaml}
+              action={<ActionPillButton label={extra.openYaml} onClick={() => setTab('yaml')} />}
+            />
+            <details className="rounded border border-panel-border bg-panel-card p-3 text-xs">
+              <summary className="cursor-pointer underline underline-offset-2">{feedback.showDetails}</summary>
+              <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono">{composeParseError}</pre>
+            </details>
+          </div>
         ) : (
           <>
             {/* TAB 1: OVERVIEW */}
@@ -1355,7 +1373,11 @@ export const ComposePage: React.FC = () => {
               <div className="space-y-3 h-full flex flex-col">
                 {composeParseError && (
                   <div role="alert" className="bg-red-500/10 border border-accent-red rounded-md px-4 py-2.5 text-xs text-accent-red">
-                    {extra.invalidYaml} {composeParseError}
+                    {extra.invalidYaml}
+                    <details className="mt-2 text-text-primary">
+                      <summary className="cursor-pointer underline underline-offset-2">{feedback.showDetails}</summary>
+                      <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words font-mono">{composeParseError}</pre>
+                    </details>
                   </div>
                 )}
                 {yamlConflict && (
@@ -1685,27 +1707,29 @@ export const ComposePage: React.FC = () => {
         <Modal
           title={fmt(t.compose.scaleTitle, { name: scaleTarget })}
           maxWidth="max-w-md"
+          feedback
+          lockFields={scaleService.pending}
           onClose={() => setScaleTarget(null)}
           footer={
             <>
-              <ActionPillButton label={t.common.cancel} onClick={() => setScaleTarget(null)} />
+              <ActionPillButton label={scaleService.pending ? t.common.close : t.common.cancel} onClick={() => setScaleTarget(null)} />
               <ActionPillButton
                 label={t.compose.scaleService}
                 variant="podman"
+                loading={scaleService.pending}
                 disabled={
                   busy || desiredScaleReplicas === undefined ||
                   !Object.prototype.hasOwnProperty.call(document?.services || {}, scaleTarget)
                 }
                 onClick={() => {
-                  if (desiredScaleReplicas === undefined) {
+                  if (busy || desiredScaleReplicas === undefined) {
                     return;
                   }
-                  postMessage('stack:scale', {
+                  scaleService.run({
                     ...actionContext,
                     service: scaleTarget,
                     replicas: desiredScaleReplicas,
                   });
-                  setScaleTarget(null);
                 }}
               />
             </>

@@ -8,6 +8,8 @@ export class StatusBarManager implements vscode.Disposable {
   private readonly progressItem: vscode.StatusBarItem;
   private hideTimer: NodeJS.Timeout | undefined;
   private lastRunningState: boolean | undefined;
+  private nextOperationId = 0;
+  private readonly activeOperations = new Map<number, string>();
 
   private constructor() {
     this.launcherItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 105);
@@ -18,6 +20,7 @@ export class StatusBarManager implements vscode.Disposable {
 
     this.progressItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 104);
     this.progressItem.name = 'Docker and Podman Studio Operations';
+    this.progressItem.command = 'dockerPodmanStudio.openPanel';
   }
 
   public static getInstance(): StatusBarManager {
@@ -73,6 +76,19 @@ export class StatusBarManager implements vscode.Disposable {
     this.progressItem.hide();
   }
 
+  public beginOperation(text: string): number {
+    const id = ++this.nextOperationId;
+    this.activeOperations.set(id, text);
+    this.showStatus(text, 'loading');
+    return id;
+  }
+
+  public finishOperation(id: number, text: string, state: 'done' | 'error'): void {
+    this.activeOperations.delete(id);
+    const remaining = [...this.activeOperations.values()].at(-1);
+    this.showStatus(remaining || text, remaining ? 'loading' : state);
+  }
+
   public dispose(): void {
     if (this.hideTimer) {
       clearTimeout(this.hideTimer);
@@ -85,21 +101,22 @@ export class StatusBarManager implements vscode.Disposable {
 export async function withStatus<T>(operation: string, task: () => Promise<T>): Promise<T> {
   const bar = StatusBarManager.getInstance();
   const engine = getEngineLabel();
+  const id = bar.beginOperation(`${engine}: ${operation}...`);
   try {
-    bar.showStatus(`${engine}: ${operation}...`, 'loading');
     const result = await task();
     const failed =
       typeof result === 'object' &&
       result !== null &&
       'success' in result &&
       result.success === false;
-    bar.showStatus(
+    bar.finishOperation(
+      id,
       `${engine}: ${bt(failed ? 'opFailed' : 'opCompleted', { op: operation })}`,
       failed ? 'error' : 'done'
     );
     return result;
   } catch (err) {
-    bar.showStatus(`${engine}: ${bt('opFailed', { op: operation })}`, 'error');
+    bar.finishOperation(id, `${engine}: ${bt('opFailed', { op: operation })}`, 'error');
     throw err;
   }
 }

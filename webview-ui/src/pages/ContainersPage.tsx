@@ -25,6 +25,7 @@ import {
 import { buildContainerTree, containerFilterForEngine } from '../containerTree';
 import { useI18n } from '../i18n';
 import { PodmanContainer, useStudioStore } from '../store';
+import { useActionRequest } from '../useActionRequest';
 import { useVsCodeMessaging } from '../vscode';
 import { PodGroups } from './PodsPage';
 
@@ -39,6 +40,7 @@ export const ContainersPage: React.FC = () => {
     volumes,
     networks,
     operationInProgress,
+    operationsInProgress,
     logEntries,
     logFilter,
     setLogFilter,
@@ -68,6 +70,7 @@ export const ContainersPage: React.FC = () => {
   const [cMounts, setCMounts] = useState('');
   const [cRestart, setCRestart] = useState('unless-stopped');
   const [cCommand, setCCommand] = useState('');
+  const createContainer = useActionRequest('container:create', () => setShowCreateModal(false));
 
   const busy = Boolean(operationInProgress);
 
@@ -108,7 +111,7 @@ export const ContainersPage: React.FC = () => {
   const composeBoundCount = visibleBase.filter((c) => c.isCompose).length;
 
   const handleCreateContainer = () => {
-    if (!cImage.trim()) {
+    if (!cImage.trim() || busy || createContainer.pending) {
       return;
     }
     const splitList = (raw: string) =>
@@ -122,7 +125,7 @@ export const ContainersPage: React.FC = () => {
         .map((s) => s.trim())
         .filter(Boolean);
 
-    postMessage('container:create', {
+    createContainer.run({
       image: cImage.trim(),
       name: cName.trim() || undefined,
       pod: createMode === 'advanced' && cPod ? cPod : undefined,
@@ -136,7 +139,6 @@ export const ContainersPage: React.FC = () => {
       restart: createMode === 'advanced' ? cRestart : undefined,
       command: createMode === 'advanced' && cCommand.trim() ? cCommand.trim() : undefined,
     });
-    setShowCreateModal(false);
   };
 
   const renderContainers = (containers: PodmanContainer[], pod?: (typeof pods)[number]) =>
@@ -187,7 +189,8 @@ export const ContainersPage: React.FC = () => {
           />
           <ActionPillButton
             label={t.common.refresh}
-            loading={busy}
+            loading={Boolean(operationsInProgress['refresh-all'])}
+            disabled={busy}
             icon={<RefreshCw className="w-3.5 h-3.5" />}
             onClick={() => postMessage('containers:list')}
           />
@@ -354,14 +357,17 @@ export const ContainersPage: React.FC = () => {
           title={fmt(t.containers.createModalTitle, { engine: engineLabel })}
           subtitle={t.containers.createModalSubtitle}
           maxWidth="max-w-3xl"
+          feedback
+          lockFields={createContainer.pending}
           onClose={() => setShowCreateModal(false)}
           footer={
             <>
-              <ActionPillButton label={t.common.cancel} onClick={() => setShowCreateModal(false)} />
+              <ActionPillButton label={createContainer.pending ? t.common.close : t.common.cancel} onClick={() => setShowCreateModal(false)} />
               <ActionPillButton
                 label={fmt(t.containers.runContainerBtn, { cmd: engineCmd })}
                 variant="brand"
-                disabled={!cImage.trim()}
+                loading={createContainer.pending}
+                disabled={!cImage.trim() || busy}
                 onClick={handleCreateContainer}
               />
             </>
@@ -587,6 +593,7 @@ export const ContainersPage: React.FC = () => {
           title={fmt(t.containers.logsModalTitle, { name: logContainer.name })}
           subtitle={`${logContainer.image} (${logContainer.id})`}
           maxWidth="max-w-4xl"
+          feedback
           onClose={() => setLogContainer(null)}
           footer={
             <>
