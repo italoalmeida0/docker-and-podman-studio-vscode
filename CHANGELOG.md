@@ -4,6 +4,12 @@ All notable changes to **Docker and Podman Studio** will be documented in this f
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- Live metrics for running containers. The Containers page has a **Live metrics** view with CPU, memory, network, and block I/O charts, 1, 5, and 15 minute windows, sorting, and pause/resume. **Details** opens larger charts with averages, peaks, and process counts for one container.
+- Live sampling uses one `podman stats` or `docker stats` stream per engine that runs only while the view is visible. Connection problems show a status and retry automatically; a missing engine is reported once without retrying.
+
 ## [1.4.3] - 2026-10-30
 
 ### Changed

@@ -26,6 +26,7 @@ import { ComposeDiagnosticsProvider } from './language/diagnosticsProvider';
 import { ComposeFileDetector, mergeComposeFileList } from './services/composeDetector';
 import { assertComposeEditBase, composeEditStatuses } from './services/composeEdit';
 import { FeedbackAttempt, FeedbackAttemptTracker } from './services/feedbackAttempts';
+import { ContainerStatsMonitor } from './services/containerStatsMonitor';
 import { LogProvider } from './services/logProvider';
 import { OperationProgress } from './services/operationProgress';
 import { PodmanService } from './services/podmanService';
@@ -198,6 +199,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const fileDetector = new ComposeFileDetector(context, podman);
   const statusProvider = new StatusProvider(podman, yamlService);
   const logProvider = new LogProvider(podman);
+  const statsMonitor = new ContainerStatsMonitor({
+    spawnStream: (streamEngine) => podman.streamContainerStats(streamEngine),
+    onSamples: (streamEngine, at, samples) => {
+      studioPanel.postMessage({ command: A.STATS_SAMPLES, payload: { at, samples }, engine: streamEngine });
+    },
+    onStatus: (status) => {
+      studioPanel.postMessage({ command: A.STATS_STATUS, payload: status, engine: status.engine });
+    },
+  });
   const studioPanel = new StudioWebviewPanel(context.extensionUri);
   const launcherProvider = new StudioLauncherViewProvider();
   const statusBar = StatusBarManager.getInstance();
@@ -2198,6 +2208,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           resolveError();
           break;
         }
+        case M.STATS_WATCH: {
+          const watchEngine = payload?.engine === 'docker' || payload?.engine === 'podman'
+            ? payload.engine
+            : getConfig().engine;
+          statsMonitor.setActive(payload?.active === true ? watchEngine : null);
+          break;
+        }
         case M.LOGS_STOP: {
           if (payload.file && payload.engine && payload.projectRevision && payload.service) {
             logProvider.stopStreaming(composeLogKey(
@@ -2691,6 +2708,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   logProvider.onError((error) =>
     reportError(error.message, bt('loadingLogs'), undefined, logErrorScope(error), { engine: error.engine }));
   logProvider.onRecovery((target) => resolveError(logErrorScope(target), target.engine));
+  studioPanel.onDidClose(() => statsMonitor.setActive(null));
 
   const resourceConfigKeys: Array<keyof StudioConfig> = [
     'engine', 'dockerPath', 'podmanPath', 'composePath', 'composeCommandStyle',
@@ -2774,6 +2792,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     fileDetector,
     statusProvider,
     logProvider,
+    { dispose: () => statsMonitor.dispose() },
     studioPanel,
     cfgDisposable,
     { dispose: () => { if (configRefreshTimer) clearTimeout(configRefreshTimer); } },

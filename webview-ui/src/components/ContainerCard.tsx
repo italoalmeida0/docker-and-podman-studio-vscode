@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import {
-  FileText, Pause, Play, RotateCcw, Square, Terminal, Trash2,
+  Activity, FileText, Pause, Play, RotateCcw, Square, Terminal, Trash2,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { PodmanContainer } from '../store';
@@ -15,8 +15,9 @@ export const ContainerCard: React.FC<{
   onToggleSelection: () => void;
   onLogs: () => void;
   onDelete: () => void;
+  onMetrics?: () => void;
   restartCount?: number;
-}> = ({ container: c, busy, selected, onToggleSelection, onLogs, onDelete, restartCount }) => {
+}> = ({ container: c, busy, selected, onToggleSelection, onLogs, onDelete, onMetrics, restartCount }) => {
   const { t, fmt, engine } = useI18n();
   const { postMessage } = useVsCodeMessaging();
   const [isOpen, setIsOpen] = useState(false);
@@ -78,6 +79,13 @@ export const ContainerCard: React.FC<{
                 onClick={() => postMessage(isPaused ? 'container:unpause' : 'container:pause', {
                   containerId: c.fullId,
                 })}
+              />
+            )}
+            {onMetrics && (
+              <SmallActionButton
+                label={t.metrics.detailsBtn}
+                icon={<Activity className="w-3 h-3" />}
+                onClick={onMetrics}
               />
             )}
             <SmallActionButton

@@ -1599,6 +1599,22 @@ export class PodmanService {
     });
   }
 
+  /**
+   * Streams live usage for every running container. Podman prints a JSON array every second;
+   * Docker prints one JSON object per container per tick. Both are parsed by the stats monitor.
+   */
+  public streamContainerStats(engine: ContainerEngine): ChildProcess {
+    const { bin, baseArgs } = this.getEngineExecutable(engine);
+    const args = engine === 'podman'
+      ? [...baseArgs, 'stats', '--format', 'json', '--interval', '1']
+      : [...baseArgs, 'stats', '--format', '{{json .}}'];
+    const invocation = this.getProcessInvocation(bin, args, engine);
+    return spawn(invocation.bin, invocation.args, {
+      windowsHide: true,
+      env: invocation.env ? { ...process.env, ...invocation.env } : undefined,
+    });
+  }
+
   public openContainerTerminal(containerId: string, label?: string): void {
     const engine = this.getActiveEngine();
     const { bin, baseArgs } = this.getEngineExecutable(engine);

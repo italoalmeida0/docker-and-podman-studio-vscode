@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import {
+  Activity,
   Box,
   ChevronDown,
   ExternalLink,
@@ -23,6 +24,7 @@ import {
   StatCard,
   StatusBadge,
 } from '../components/Shared';
+import { LiveMetricsView } from '../components/LiveMetricsView';
 import { buildContainerTree, containerFilterForEngine } from '../containerTree';
 import { useI18n } from '../i18n';
 import { useFeedbackTexts } from '../i18n/feedback';
@@ -59,6 +61,8 @@ export const ContainersPage: React.FC = () => {
   const [createMode, setCreateMode] = useState<'simple' | 'advanced'>('simple');
   const [logContainer, setLogContainer] = useState<PodmanContainer | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<PodmanContainer | null>(null);
+  const [viewMode, setViewMode] = useState<'list' | 'live'>('list');
+  const [metricsId, setMetricsId] = useState<string | null>(null);
 
   // Create Container Form
   const [cImage, setCImage] = useState('docker.io/library/nginx:alpine');
@@ -167,6 +171,12 @@ export const ContainersPage: React.FC = () => {
           }}
           onDelete={() => setDeleteTarget(container)}
           restartCount={podMember?.restartCount}
+          onMetrics={isRunningState(container.state) && !container.isInfra
+            ? () => {
+              setMetricsId(container.id);
+              setViewMode('live');
+            }
+            : undefined}
         />
       );
     });
@@ -229,6 +239,30 @@ export const ContainersPage: React.FC = () => {
           )}
         </div>
 
+        <div role="tablist" aria-label={t.metrics.viewSwitcher} className="inline-flex max-w-full flex-wrap gap-1 self-start rounded-lg border border-panel-border bg-panel-card p-1">
+          {([
+            ['list', t.metrics.viewContainers, <Box key="icon-list" className="w-3.5 h-3.5" />],
+            ['live', t.metrics.viewLive, <Activity key="icon-live" className="w-3.5 h-3.5" />],
+          ] as const).map(([id, label, icon]) => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={viewMode === id}
+              onClick={() => setViewMode(id)}
+              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs transition-colors ${
+                viewMode === id
+                  ? `${isPodman ? 'bg-accent-purple' : 'bg-accent-blue'} font-medium text-white`
+                  : 'text-text-secondary hover:text-text-primary'
+              }`}
+            >
+              {icon}
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {viewMode === 'list' && (<>
         {/* Filters */}
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div className="relative flex-1 min-w-0 basis-[180px]">
@@ -356,6 +390,11 @@ export const ContainersPage: React.FC = () => {
               />
             }
           />
+        )}
+        </>)}
+
+        {viewMode === 'live' && (
+          <LiveMetricsView containers={allContainers} selectedId={metricsId} onSelect={setMetricsId} />
         )}
       </div>
 

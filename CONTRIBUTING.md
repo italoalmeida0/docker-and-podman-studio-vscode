@@ -52,6 +52,10 @@ $env:STUDIO_BROWSER_PATH = 'C:\Program Files\Google\Chrome\Application\chrome.ex
 node --test tests\responsive-layout.test.cjs
 ```
 
+### Live metrics tests
+
+`tests\container-stats.test.cjs` and `tests\container-metrics-series.test.cjs` run as part of `npm test`. The live metrics browser test (`tests\container-metrics-ui.test.cjs`) uses the `STUDIO_BROWSER_PATH` setting described above; set `STUDIO_METRICS_ARTIFACTS` to a writable folder to save screenshots. It uses simulated samples and does not start containers. The stats integration test in `tests\container-stats.integration.test.cjs` needs the Podman integration variables below, creates uniquely named labelled containers, and removes them afterward.
+
 ### Podman integration tests
 
 These opt-in tests create uniquely named containers, pods, networks, volumes, images, and Compose projects, then remove only those test resources. They require a running Podman engine with CPU and memory limit support, a compatible Compose provider, and a Linux image that is already available locally and contains `sh`. Image-declared volume paths are mounted as temporary filesystems to avoid leaving anonymous volumes; paths containing commas, colons, dollar signs, or newlines are not supported. They do not run global prune, machine lifecycle, registry login/logout, or push commands. Use an isolated test engine when possible.
@@ -63,7 +67,7 @@ $env:PODMAN_INTEGRATION_TESTS = '1'
 $env:PODMAN_TEST_IMAGE = 'docker.io/library/redis:7-alpine'
 # Optional: an existing writable directory for temporary Compose and build files.
 $env:PODMAN_TEST_ROOT = $env:TEMP
-node --test tests\podman.integration.test.cjs tests\studio-resources.integration.test.cjs
+node --test tests\podman.integration.test.cjs tests\studio-resources.integration.test.cjs tests\container-stats.integration.test.cjs
 ```
 
 On Linux or macOS:
@@ -72,7 +76,7 @@ On Linux or macOS:
 export PODMAN_INTEGRATION_TESTS=1
 export PODMAN_TEST_IMAGE=docker.io/library/redis:7-alpine
 # Optional: export PODMAN_TEST_ROOT=/path/to/existing/writable/directory
-node --test tests/podman.integration.test.cjs tests/studio-resources.integration.test.cjs
+node --test tests/podman.integration.test.cjs tests/studio-resources.integration.test.cjs tests/container-stats.integration.test.cjs
 ```
 
 The image is checked locally rather than pulled automatically. The tests cover runtime-scaled replica lifecycle/logs, selected service builds and removal, and cleanup eligibility for volumes and networks referenced by stopped containers, using only isolated fixtures. They report cleanup failures explicitly. Podman 6.1.4 with podman-compose 1.6.0 on Windows has been exercised; other Podman versions, operating systems, and Compose providers should also be tested in their own environments.

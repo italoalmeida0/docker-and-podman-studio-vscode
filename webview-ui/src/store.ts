@@ -8,6 +8,7 @@ import { FailurePresentation } from '../../src/shared/failureMessages';
 import type { OperationLabel } from './operationLabels';
 import { ComposeDraft, ComposeServiceDraft, syncComposeDraft } from './composeDrafts';
 import { createEngineMessageGate, StudioMessage, useVsCodeMessaging } from './vscode';
+import { useContainerMetrics } from './statsStore';
 
 export type ContainerEngine = 'docker' | 'podman';
 
@@ -972,6 +973,16 @@ export function useStudioMessageBridge(): void {
         case 'log:line':
           if (p && (!p.target || p.target === useStudioStore.getState().activeLogTarget)) {
             store.appendLogLine(p);
+          }
+          break;
+        case 'stats:samples':
+          if (msg.engine && typeof p?.at === 'number' && Array.isArray(p?.samples)) {
+            useContainerMetrics.getState().applySamples(msg.engine, p.at, p.samples);
+          }
+          break;
+        case 'stats:status':
+          if (msg.engine && p && typeof p === 'object') {
+            useContainerMetrics.getState().applyStatus(msg.engine, p);
           }
           break;
         case 'settings:update':
