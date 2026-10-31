@@ -31,6 +31,8 @@ export interface ContainerStatsMonitorOptions {
   restartAfterMs?: number;
   initialRetryMs?: number;
   maxRetryMs?: number;
+  dockerPublishIntervalMs?: number;
+  idleRetryMs?: number;
 }
 
 interface ResolvedOptions {
@@ -44,6 +46,8 @@ interface ResolvedOptions {
   restartAfterMs: number;
   initialRetryMs: number;
   maxRetryMs: number;
+  dockerPublishIntervalMs: number;
+  idleRetryMs: number;
 }
 
 function isStats(value: RawContainerStats | null): value is RawContainerStats {
@@ -70,6 +74,8 @@ export class ContainerStatsMonitor {
   private retryMs = 0;
   private retryHandle: unknown;
   private watchdogHandle: unknown;
+  private readonly pendingDockerStats = new Map<string, RawContainerStats>();
+  private lastDockerPublishAt: number | null = null;
 
   constructor(options: ContainerStatsMonitorOptions) {
     this.options = {
@@ -83,6 +89,8 @@ export class ContainerStatsMonitor {
       restartAfterMs: options.restartAfterMs ?? 20_000,
       initialRetryMs: options.initialRetryMs ?? 2_000,
       maxRetryMs: options.maxRetryMs ?? 30_000,
+      dockerPublishIntervalMs: options.dockerPublishIntervalMs ?? 900,
+      idleRetryMs: options.idleRetryMs ?? 3_000,
     };
   }
 
@@ -111,6 +119,8 @@ export class ContainerStatsMonitor {
     const generation = ++this.generation;
     this.arrayParser = createJsonArrayStreamParser();
     this.lineParser = createJsonLineParser();
+    this.pendingDockerStats.clear();
+    this.lastDockerPublishAt = null;
     this.tracker.reset();
     this.stderrTail = '';
     this.stalled = false;
@@ -160,19 +170,37 @@ export class ContainerStatsMonitor {
     try {
       if (engine === 'podman') {
         for (const values of this.arrayParser.push(text)) {
-          this.publish(engine, values.map((value) => normalizePodmanStats(value)).filter(isStats));
+          this.publish(engine, values.map((value) => normalizePodmanStats(value)).filter(isStats), this.options.now());
         }
         return;
       }
-      const stats = this.lineParser.push(text).map((value) => normalizeDockerStats(value)).filter(isStats);
-      if (stats.length > 0) this.publish(engine, stats);
+      for (const value of this.lineParser.push(text)) {
+        const stats = normalizeDockerStats(value);
+        if (stats) this.pendingDockerStats.set(stats.id, stats);
+      }
+      this.flushDockerStats(engine);
     } catch (error) {
       this.restart('unexpectedOutput', error instanceof Error ? error.message : String(error));
     }
   }
 
-  private publish(engine: StatsEngine, stats: RawContainerStats[]): void {
+  /**
+   * Docker writes a frame about every 500 ms. Only the latest reading per container is kept, and
+   * a batch is published at most once per interval so Docker and Podman share the same cadence.
+   */
+  private flushDockerStats(engine: StatsEngine): void {
+    if (this.pendingDockerStats.size === 0) return;
     const at = this.options.now();
+    if (this.lastDockerPublishAt !== null && at - this.lastDockerPublishAt < this.options.dockerPublishIntervalMs) {
+      return;
+    }
+    const batch = [...this.pendingDockerStats.values()];
+    this.pendingDockerStats.clear();
+    this.lastDockerPublishAt = at;
+    this.publish(engine, batch, at);
+  }
+
+  private publish(engine: StatsEngine, stats: RawContainerStats[], at: number): void {
     const samples = this.tracker.observe(stats, at);
     const firstSample = this.lastSampleAt === null;
     this.lastSampleAt = at;
@@ -186,14 +214,30 @@ export class ContainerStatsMonitor {
 
   private handleClose(generation: number, code: number | null): void {
     if (generation !== this.generation) return;
+    const engine = this.engine;
     this.child = null;
     this.cancelWatchdog();
     const detail = this.stderrTail.trim();
     if (code === 0) {
+      // Docker exits cleanly when no containers are running or when the daemon restarts; reconnect without an error.
+      if (engine === 'docker') {
+        this.scheduleQuietReconnect();
+        return;
+      }
       this.scheduleRetry('noData', 'The engine stopped the statistics stream.');
       return;
     }
     this.scheduleRetry(classifyStatsFailure(detail), detail ? detail.slice(-400) : `exit code ${code}`);
+  }
+
+  private scheduleQuietReconnect(): void {
+    const engine = this.engine;
+    if (!engine) return;
+    this.retryHandle = this.options.schedule(() => {
+      this.retryHandle = undefined;
+      if (this.engine !== engine) return;
+      this.spawn();
+    }, this.options.idleRetryMs);
   }
 
   private fail(generation: number, error: unknown): void {

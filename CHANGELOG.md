@@ -4,6 +4,13 @@ All notable changes to **Docker and Podman Studio** will be documented in this f
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-10-31
+
+### Fixed
+- Docker live metrics show data again. Docker writes cursor and erase codes into its streaming statistics output, which Studio treated as corrupted output and restarted endlessly. Studio now removes those codes, ignores text that is not a statistics object, and publishes Docker samples about once per second, like Podman.
+- When Docker has no running containers, the live metrics view reconnects quietly instead of reporting a reconnection error.
+- Podman live metrics are unchanged.
+
 ## [1.5.0] - 2026-10-31
 
 ### Added

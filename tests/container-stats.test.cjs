@@ -120,7 +120,20 @@ test('the JSON line parser joins lines split across chunks', () => {
   const second = parser.push('b", "Name": "api"}\r\n');
   assert.equal(first.length, 1);
   assert.deepEqual(second, [{ ID: 'bb', Name: 'api' }]);
-  assert.throws(() => parser.push('not json\n'), /statistics line/);
+  assert.deepEqual(parser.push('WARNING: the engine is busy\n\n'), [], 'text without an object is ignored');
+  assert.throws(() => parser.push('{"ID": }\n'), /statistics line/, 'a broken object is still rejected');
+});
+
+test('docker frames with terminal control codes parse into the same objects', () => {
+  const frame = (value) => `\u001b[H${JSON.stringify(value)}\u001b[K\n`;
+  const parser = stats.createJsonLineParser();
+  const first = parser.push(`${frame(dockerLine)}${frame({ ...dockerLine, ID: 'bbbbbbbbbbbb', Name: 'api' })}\u001b[J`);
+  assert.deepEqual(first.map((item) => item.ID), ['a1b2c3d4e5f6', 'bbbbbbbbbbbb']);
+  assert.deepEqual(parser.push('\u001b['), [], 'an escape sequence split across chunks waits for its end');
+  const next = parser.push(`H${JSON.stringify(dockerLine)}\u001b[K\n`);
+  assert.equal(next.length, 1);
+  assert.equal(next[0].Name, 'web');
+  assert.equal(stats.stripTerminalControl('\u001b[2J\u001b[?25lready\u001b[K'), 'ready');
 });
 
 test('rates come from consecutive cumulative counters and ignore restarts and gaps', () => {
@@ -359,13 +372,54 @@ test('malformed output restarts the stream instead of publishing guessed values'
   assert.equal(samples.length, 0);
 });
 
-test('a clean stream end is retried as missing data', () => {
+test('a clean Podman stream end is retried as missing data', () => {
   const { monitor, children, statuses } = createMonitor();
-  monitor.setActive('docker');
+  monitor.setActive('podman');
   children[0].exit(0);
   assert.equal(statuses.at(-1).state, 'retrying');
   assert.equal(statuses.at(-1).code, 'noData');
   assert.equal(children.length, 1, 'the retry waits for the delay');
+});
+
+test('docker frames with terminal control codes produce live samples without a retry', async () => {
+  const { monitor, children, statuses, samples } = createMonitor({ dockerPublishIntervalMs: 0 });
+  monitor.setActive('docker');
+  children[0].stdout.write(`\u001b[H${JSON.stringify(dockerLine)}\u001b[K\n\u001b[J`);
+  await settle();
+  assert.equal(samples.length, 1);
+  assert.equal(samples[0].engine, 'docker');
+  assert.equal(samples[0].batch[0].id, 'a1b2c3d4e5f6');
+  assert.equal(statuses.at(-1).state, 'live');
+  assert.equal(statuses.some((status) => status.state === 'retrying'), false);
+});
+
+test('docker frames are published at most once per interval with the latest reading', async () => {
+  const { monitor, children, samples, clock } = createMonitor();
+  monitor.setActive('docker');
+  const frame = (cpu) => `\u001b[H${JSON.stringify({ ...dockerLine, CPUPerc: cpu })}\u001b[K\n\u001b[J`;
+  children[0].stdout.write(frame('1.00%'));
+  await settle();
+  clock.advance(500);
+  children[0].stdout.write(frame('2.00%'));
+  await settle();
+  clock.advance(500);
+  children[0].stdout.write(frame('3.00%'));
+  await settle();
+  assert.equal(samples.length, 2, 'the frame half a second later is held back');
+  assert.equal(samples[1].batch[0].cpuPercent, 3);
+});
+
+test('a docker stream that exits cleanly reconnects quietly while no containers run', () => {
+  const { monitor, children, statuses, clock } = createMonitor();
+  monitor.setActive('docker');
+  const statusCount = statuses.length;
+  children[0].exit(0);
+  assert.equal(statuses.length, statusCount, 'no retry status is shown');
+  clock.advance(2_999);
+  assert.equal(children.length, 1, 'the next stream waits for the idle delay');
+  clock.advance(1);
+  assert.equal(children.length, 2, 'the next stream starts after the idle delay');
+  assert.equal(statuses.some((status) => status.state === 'retrying'), false);
 });
 
 test('disposing the monitor stops the stream and cancels pending retries', () => {

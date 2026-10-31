@@ -202,23 +202,40 @@ export interface JsonLineParser {
   push(chunk: string): unknown[];
 }
 
-/** `docker stats --format "{{json .}}"` prints one JSON object per line. */
+const MAX_PENDING_LINE_LENGTH = 1_048_576;
+
+/** Removes ANSI escape sequences such as cursor moves, erase-line, and mode changes. */
+export function stripTerminalControl(text: string): string {
+  return text.replace(/\u001b(?:\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])/g, '');
+}
+
+/**
+ * `docker stats --format "{{json .}}"` prints one JSON object per line. While streaming, the CLI
+ * also writes cursor and erase codes around every frame, even when stdout is not a terminal, so
+ * those codes are removed first. Lines without an object (warnings, blank lines) are ignored; an
+ * object that cannot be parsed still fails because its values cannot be trusted.
+ */
 export function createJsonLineParser(): JsonLineParser {
   let pending = '';
   return {
     push(chunk: string): unknown[] {
       const lines = (pending + chunk).split('\n');
       pending = lines.pop() ?? '';
-      return lines
-        .map((line) => line.trim())
-        .filter(Boolean)
-        .map((line) => {
-          try {
-            return JSON.parse(line);
-          } catch {
-            throw new StatsOutputError('The engine returned a statistics line that could not be read.');
-          }
-        });
+      if (pending.length > MAX_PENDING_LINE_LENGTH) {
+        pending = '';
+        throw new StatsOutputError('The engine returned a statistics line that is too long to read.');
+      }
+      const values: unknown[] = [];
+      for (const raw of lines) {
+        const line = stripTerminalControl(raw).trim();
+        if (!line.startsWith('{')) continue;
+        try {
+          values.push(JSON.parse(line));
+        } catch {
+          throw new StatsOutputError('The engine returned a statistics line that could not be read.');
+        }
+      }
+      return values;
     },
   };
 }
